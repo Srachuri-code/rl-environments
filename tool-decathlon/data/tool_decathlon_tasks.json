@@ -1,7 +1,6 @@
 [
   {
     "task_id": "ab-testing",
-    "domain": "other",
     "prompt": [
       {
         "role": "system",
@@ -13,6 +12,7 @@
       }
     ],
     "info": {
+      "task_id": "ab-testing",
       "mcp_servers": [
         "google-cloud",
         "filesystem"
@@ -23,74 +23,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "arrange-workspace",
-    "domain": "other",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Please help me organize the files in my workspace. The file structure should be as shown below. \n\n\u251c\u2500\u2500 School\n\u2502   \u251c\u2500\u2500 Courses_Materials\n\u2502   \u251c\u2500\u2500 Graduation_Projects\n\u2502   \u251c\u2500\u2500 Applications_Materials\n\u2502   \u2514\u2500\u2500 Language_Exam_Preparation\n\u251c\u2500\u2500 Work\n\u2502   \u251c\u2500\u2500 Projects\n\u2502   \u251c\u2500\u2500 Software\n|   |\u2014\u2014 Offer_Galary\n|   |\u2014\u2014 Job_Application_Materials \n\u2514\u2500\u2500 Entertainment\n    \u251c\u2500\u2500 Movies\n    \u251c\u2500\u2500 Music\n    \u2514\u2500\u2500 Pictures\n        \u2514\u2500\u2500 Year-2025\n            \u251c\u2500\u2500 People\n            \u251c\u2500\u2500 Landscape\n            \u2514\u2500\u2500 Pets"
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "filesystem",
-        "terminal",
-        "pdf-tools",
-        "excel"
-      ],
-      "local_tools": [
-        "claim_done",
-        "python_execute",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": false
-    }
-  },
-  {
-    "task_id": "detect-revised-terms",
-    "domain": "other",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Please help me read new_law.pdf and each case judgment document, identify any clauses cited that conflict with, are inconsistent with, have been revised by, or repealed under the new law; based on your analysis, generate a list of legal clauses in the judgment documents that need to be amended, and return the results in the following format:\n```\n\u6848\u4ef6\u6587\u4ef6\u540d\u79f0,\u5224\u51b3\u6587\u4e66\u4e2d\u7684\u539f\u59cb\u6761\u6b3e,\u539f\u59cb\u5f15\u7528\u5185\u5bb9,\u65b0\u6cd5\u6761\u6b3e,\u65b0\u6cd5\u6761\u6b3e\u5185\u5bb9\n\"case1.pdf\",\"\u300axx\u6cd5\u300b\u7b2cxx\u6761\uff08\u7b2cxx\u6b3e\uff09\",\"xxx\",\"\u300a\u6c11\u6cd5\u5178\u300b\u7b2cxx\u6761\uff08\u7b2cxx\u6b3e\uff09\",\"xxx\"\n```\nFinally, please write the returned content into the `revised_terms.csv` file."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "filesystem",
-        "pdf-tools"
-      ],
-      "local_tools": [
-        "claim_done",
-        "python_execute",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
     "task_id": "academic-pdf-report",
-    "domain": "research",
     "prompt": [
       {
         "role": "system",
@@ -102,6 +39,7 @@
       }
     ],
     "info": {
+      "task_id": "academic-pdf-report",
       "mcp_servers": [
         "playwright_with_chunk",
         "excel",
@@ -116,14 +54,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
     "task_id": "academic-warning",
-    "domain": "research",
     "prompt": [
       {
         "role": "system",
@@ -135,6 +70,7 @@
       }
     ],
     "info": {
+      "task_id": "academic-warning",
       "mcp_servers": [
         "google-cloud",
         "excel",
@@ -145,14 +81,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
     "task_id": "add-bibtex",
-    "domain": "research",
     "prompt": [
       {
         "role": "system",
@@ -164,6 +97,7 @@
       }
     ],
     "info": {
+      "task_id": "add-bibtex",
       "mcp_servers": [
         "scholarly",
         "playwright_with_chunk",
@@ -178,14 +112,69 @@
         "history",
         "web_search",
         "handle_overlong_tool_outputs"
+      ]
+    }
+  },
+  {
+    "task_id": "apply-phd-email",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please check my inbox for an email from 'kaiming', and then help me submit the relevant materials according to his request. All materials are in the workspace, and the email subject should exactly be `PhD Application Materials Submission (Student ID: {studentid})`. My personal information is in the memory."
+      }
+    ],
+    "info": {
+      "task_id": "apply-phd-email",
+      "mcp_servers": [
+        "filesystem",
+        "memory",
+        "emails",
+        "terminal",
+        "pdf-tools"
       ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      "local_tools": [
+        "claim_done",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "arrange-workspace",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please help me organize the files in my workspace. The file structure should be as shown below. \n\n\u251c\u2500\u2500 School\n\u2502   \u251c\u2500\u2500 Courses_Materials\n\u2502   \u251c\u2500\u2500 Graduation_Projects\n\u2502   \u251c\u2500\u2500 Applications_Materials\n\u2502   \u2514\u2500\u2500 Language_Exam_Preparation\n\u251c\u2500\u2500 Work\n\u2502   \u251c\u2500\u2500 Projects\n\u2502   \u251c\u2500\u2500 Software\n|   |\u2014\u2014 Offer_Galary\n|   |\u2014\u2014 Job_Application_Materials \n\u2514\u2500\u2500 Entertainment\n    \u251c\u2500\u2500 Movies\n    \u251c\u2500\u2500 Music\n    \u2514\u2500\u2500 Pictures\n        \u2514\u2500\u2500 Year-2025\n            \u251c\u2500\u2500 People\n            \u251c\u2500\u2500 Landscape\n            \u2514\u2500\u2500 Pets"
+      }
+    ],
+    "info": {
+      "task_id": "arrange-workspace",
+      "mcp_servers": [
+        "filesystem",
+        "terminal",
+        "pdf-tools",
+        "excel"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
     }
   },
   {
     "task_id": "canvas-arrange-exam",
-    "domain": "campus",
     "prompt": [
       {
         "role": "system",
@@ -197,6 +186,7 @@
       }
     ],
     "info": {
+      "task_id": "canvas-arrange-exam",
       "mcp_servers": [
         "canvas",
         "emails",
@@ -209,14 +199,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
     "task_id": "canvas-art-manager",
-    "domain": "campus",
     "prompt": [
       {
         "role": "system",
@@ -228,6 +215,7 @@
       }
     ],
     "info": {
+      "task_id": "canvas-art-manager",
       "mcp_servers": [
         "filesystem",
         "canvas",
@@ -240,14 +228,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": false
+      ]
     }
   },
   {
     "task_id": "canvas-art-quiz",
-    "domain": "campus",
     "prompt": [
       {
         "role": "system",
@@ -259,6 +244,7 @@
       }
     ],
     "info": {
+      "task_id": "canvas-art-quiz",
       "mcp_servers": [
         "filesystem",
         "canvas",
@@ -270,14 +256,148 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
+      ]
+    }
+  },
+  {
+    "task_id": "canvas-do-quiz",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "My personal information is stored in memory. Check which unfinished course quizzes I have on canvas, and help me complete all of them.\n\nTips: there might be some error with the canvas. But anyway you must  make sure all quizzes are submitted and answered correctly."
+      }
+    ],
+    "info": {
+      "task_id": "canvas-do-quiz",
+      "mcp_servers": [
+        "memory",
+        "canvas"
       ],
-      "has_initial_workspace": true,
-      "has_groundtruth": false
+      "local_tools": [
+        "claim_done",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "canvas-homework-grader-python",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Your task is to check your email for homework2 submissions and grade on Canvas. Please download Python files from email attachments to local workspace and execute each Python file in terminal to check for errors. If the Python file is correct, give it a score of 10 in Canvas; otherwise, give it a score of 0. You could check the requirements of homework2 in `assignments/homework2.md`and students' ID in `student_canvas_ids.csv`. For students who submitted multiple times, use the latest submission."
+      }
+    ],
+    "info": {
+      "task_id": "canvas-homework-grader-python",
+      "mcp_servers": [
+        "canvas",
+        "filesystem",
+        "terminal",
+        "emails"
+      ],
+      "local_tools": [
+        "python_execute",
+        "claim_done",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "canvas-list-test",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "My personal information is all stored in memory. Based on the course information on Canvas, as well as my assignment and quiz submission status. Find all my unsubmitted course assignments and quizzes that have to be completed, organize the information according to the required fields in the workspace's CSV header, keeping the format consistent with these examples, and complete these CSV files. In filling the files, please fill the quizzes/assignments in chronological order by their deadlines (DDL), and for quizzes/assignmen with the same DDL, sort them in the dictionary order of the class code. You should directly edit in the given 2 CSV files without changing their file names. For course codes and names, please remove the -x suffix."
+      }
+    ],
+    "info": {
+      "task_id": "canvas-list-test",
+      "mcp_servers": [
+        "canvas",
+        "memory"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "canvas-new-students-notification",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Several new students who have changed majors will be taking courses this semester. A new summary sheet for the course `Introduction to AI-8` has been created in the workspace, and it shows that some of the students have not yet been enrolled in it. You need to enroll these students. Since they missed the first assignment, privately message only these newly enrolled students to inform them that their first assignment grade will be the same as their second, and remind them to complete the assignment diligently."
+      }
+    ],
+    "info": {
+      "task_id": "canvas-new-students-notification",
+      "mcp_servers": [
+        "filesystem",
+        "terminal",
+        "canvas"
+      ],
+      "local_tools": [
+        "claim_done",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "canvas-submit-late-work",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "My name is Zachary Edwards, and I\u2019m a forgetful person. I often complete my assignments but forget to submit them. All of my assignments are saved somewhere in my workspace, but I can\u2019t remember their filenames. Please search for the matching files based on the assignment content. Do not create assignment content on your own. Only submit the assignments I have already written. If you can't find them, do not submit anything.\n\nMy personal information can be found in memory.\n\nThe instructor has published a submission record sheet named Cinema_Culture_Grade_Summary.xlsx. Please help me identify which assignments have not been submitted yet. Then, submit the missing assignments on canvas.\n\nYou only need to submit the assignments that are missing \u2014 no need to take action on those that are already submitted.\n\nAlso, I want to mention that I was officially excused from Assignment 2 due to a leave of absence. I informed the instructor at the time the assignment was given. The formal leave document is saved somewhere in my workspace, but the TA seems to have forgotten about it.\n\nAfter submitting the required assignments, please also:\nLocate the leave document.\nSend an email to the TA to remind them about my approved leave for Assignment 2.\nAttach the leave document in the email.\n"
+      }
+    ],
+    "info": {
+      "task_id": "canvas-submit-late-work",
+      "mcp_servers": [
+        "canvas",
+        "memory",
+        "filesystem",
+        "emails"
+      ],
+      "local_tools": [
+        "python_execute",
+        "manage_context",
+        "handle_overlong_tool_outputs",
+        "history"
+      ]
     }
   },
   {
     "task_id": "cooking-guidance",
-    "domain": "daily",
     "prompt": [
       {
         "role": "system",
@@ -289,6 +409,7 @@
       }
     ],
     "info": {
+      "task_id": "cooking-guidance",
       "mcp_servers": [
         "filesystem",
         "howtocook"
@@ -298,14 +419,40 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
-    "task_id": "music-analysis",
-    "domain": "daily",
+    "task_id": "course-assistant",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nToday's date, time, and day of the week are: !!<<<<||||time||||>>>>!!  \nWhen any task involves dates or times, use the value provided above\u2014no need to invoke a date-fetching tool.  \nIf reading or writing local files and the user supplies a relative path, combine it with the workspace directory to form the full path.\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "I am the teaching assistant for the NLP course. The final presentation assignments from the students have now been received in my email. All the statistical data for this course is stored in the Excel file named `nlp_statistics.xlsx` within the workspace. Please help me identify which students have not submitted their assignments (including the presentation submissions from my inbox), and send them an email. The subject of the email should be \"nlp-course-emergency,\" and the content must include the student's name and ID number to avoid the message being marked as spam."
+      }
+    ],
+    "info": {
+      "task_id": "course-assistant",
+      "mcp_servers": [
+        "excel",
+        "emails",
+        "filesystem",
+        "terminal"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "course-schedule",
     "prompt": [
       {
         "role": "system",
@@ -313,29 +460,86 @@
       },
       {
         "role": "user",
-        "content": "A music streaming platform wants to accurately identify the 1940s pop singles with the most sustained popularity during their classic oldies promotion campaign, in order to replicate marketing strategies and plan themed programs. You should use the original sheet data `Billboard Pop Chart by Year` on my google drive to complete the following analysis:\n\n1. Calculate the total number of consecutive weeks each song stayed on the chart (defined as the longest streak of non-empty/non-black weekly rankings).\n2. Strictly follow the format of the `music_analysis_result_example.xlsx` in the workspace, create one sheet for each year and fill them. The final resulted file should be named as `music_analysis_result.xlsx` with multiple sheets. The final leaderboard in each sheet should contain all songds and be sorted in descending order firstly by the \"Longest Consecutive Top 3 Weeks\", secondly by \"Song\" (In lexicographical order), then by \"Artist\" (In lexicographical order).\n\n"
+        "content": "My personal information is stored in Memory. The workspace contains my course schedule and a master exam table (in Excel format). The courses I need to take this semester are in list.txt.\nPlease help me choose the right courses. I can only take one of each course. I have club activities in the evening, so I'll only take daytime courses. Also, my favorite teacher is Yulian(\u90c1\u83b2). if she teaches any required courses, please make sure to take her.\nBased on my personal information, please first help me find the right specific courses. Then, help me find the exams I need to take this semester. Save the exam information in the workspace in a file named exam_schedule.jsonl. The format should refer to `format.md`.\nAll information must match the Excel file. If a course is not required this semester(Course exemption), omit it. Finally, sort the objects in the JSONL file by exam time."
       }
     ],
     "info": {
+      "task_id": "course-schedule",
       "mcp_servers": [
+        "filesystem",
+        "memory",
         "excel",
-        "google_sheet",
-        "terminal"
+        "pdf-tools",
+        "fetch"
       ],
       "local_tools": [
+        "claim_done",
+        "web_search",
         "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "courses-ta-hws",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please find all files in the workspace that are related to the \"Operating Systems Fundamentals\" course and belong to Assignment 3. Based on the correspondence table between colleges and student IDs, rename these files uniformly as: Name-College-StudentID-OS-HW3. Please maintain the original capitalization and spacing of student names and colleges, and do not arbitrarily add or remove words. After completing the renaming, create a new directory called \"os_hw3/\" , and within this directory, place them into three new subdirectories: \"C\", \"Rust\", and \"Python\" respectively. Please delete all the original code files, including those outside of this course and those not related to the third assignment, after completing the organization process to keep the workspace clean."
+      }
+    ],
+    "info": {
+      "task_id": "courses-ta-hws",
+      "mcp_servers": [
+        "terminal",
+        "excel",
+        "filesystem"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "cvpr-research",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "I am a doctoral student in computer vision and will graduate next year. My career plan is to become a teacher in a university, so after graduating with my doctorate, I plan to find a professor who is engaged in the same research field to conduct postdoctoral work. More personal information about me can be obtained from personal_info.md \u200b\u200bunder the workspace. To ensure that this professor is active in the academic community, please help me find the three people who have published the most articles at CVPR 2025 and who meet my requirements. Please put the names of these three researchers in the `top3_match_researchers.txt` under the workspace, each in a spearate line.\n"
+      }
+    ],
+    "info": {
+      "task_id": "cvpr-research",
+      "mcp_servers": [
+        "filesystem",
+        "fetch",
+        "playwright_with_chunk"
+      ],
+      "local_tools": [
+        "web_search",
         "claim_done",
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
-    "task_id": "shopping-helper",
-    "domain": "daily",
+    "task_id": "dataset-license-issue",
     "prompt": [
       {
         "role": "system",
@@ -343,27 +547,138 @@
       },
       {
         "role": "user",
-        "content": "I'm looking to buy furniture for my new house and want to buy a sofa on amazon. My budget is less than 400 USD, and I want a leather (either faux, pu or vegan is ok) sofa in black. Please help me find products and recommend 3 suitable products and fill the details in `recommend.json`. An example is shown in `example.json`."
+        "content": "Someone just filed an issue in my Annoy-DataSync project asking about the license information for our released datasets. Could you please help me figure out which license we should use? My requirement is to directly reuse the license from the dataset's direct data sources or the models used for synthesis. If there are multiple sources, I'll use the one with the most permissive permissions for derivative/secondary use. Once you've determined the license, please reply and close this issue, strictly following the following format (do not modify, add, remove, or alter anything other than placeholders):\n\n\"Thanks for your interest! The licenses for the two datasets are: Annoy-PyEdu-Rs-Raw = {license}, Annoy-PyEdu-Rs = {license}\"\n\nAlso, please update the corresponding huggingface dataset pages by adding the following line at the end of the existing readme. No other content is required:\n\"\\n\\n**License**\\n\\nThe license for this dataset is {license}.\"\n\nIf you need the huggingface token, you can find it under `.hf_token`."
       }
     ],
     "info": {
+      "task_id": "dataset-license-issue",
       "mcp_servers": [
-        "filesystem",
-        "playwright_with_chunk"
+        "huggingface",
+        "github",
+        "terminal",
+        "fetch"
       ],
       "local_tools": [
-        "history",
+        "python_execute",
         "claim_done",
+        "web_search",
         "handle_overlong_tool_outputs",
-        "manage_context"
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "detect-revised-terms",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please help me read new_law.pdf and each case judgment document, identify any clauses cited that conflict with, are inconsistent with, have been revised by, or repealed under the new law; based on your analysis, generate a list of legal clauses in the judgment documents that need to be amended, and return the results in the following format:\n```\n\u6848\u4ef6\u6587\u4ef6\u540d\u79f0,\u5224\u51b3\u6587\u4e66\u4e2d\u7684\u539f\u59cb\u6761\u6b3e,\u539f\u59cb\u5f15\u7528\u5185\u5bb9,\u65b0\u6cd5\u6761\u6b3e,\u65b0\u6cd5\u6761\u6b3e\u5185\u5bb9\n\"case1.pdf\",\"\u300axx\u6cd5\u300b\u7b2cxx\u6761\uff08\u7b2cxx\u6b3e\uff09\",\"xxx\",\"\u300a\u6c11\u6cd5\u5178\u300b\u7b2cxx\u6761\uff08\u7b2cxx\u6b3e\uff09\",\"xxx\"\n```\nFinally, please write the returned content into the `revised_terms.csv` file."
+      }
+    ],
+    "info": {
+      "task_id": "detect-revised-terms",
+      "mcp_servers": [
+        "filesystem",
+        "pdf-tools"
       ],
-      "has_initial_workspace": true,
-      "has_groundtruth": false
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "dietary-health",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "I am a male university student, and my detailed body information is in `body.md`. I plan to create a fitness plan for the next 3 months, and I am currently at the initial stage of fat loss. Please help me analyze the dietary list of my rest day (located in `cuisine.md`, with all dishes eaten in one portion, use info from howtocook) to determine whether it meets the nutritional requirements of carbohydrates and protein. The nutritional composition of various raw ingredients is provided in `Nutrition.xlsx`, and the fitness dietary guidelines are in `health_guide.md`. Please follow exactly the instructions in format.md to give your nutritional analysis of the foods and record it in a newly created `analysis.md` file."
+      }
+    ],
+    "info": {
+      "task_id": "dietary-health",
+      "mcp_servers": [
+        "filesystem",
+        "howtocook",
+        "excel",
+        "terminal"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "email-paper-homepage",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Update my personal homepage according to the following rules:\n- For papers currently marked as \"preprint\" or \"under review\" on my homepage, update their acceptance information according to my emails.\n- Update the status of code open-sourcing for these accepted papers only. If there is a released repository on my GitHub for the corresponding paper, update it on my homepage."
+      }
+    ],
+    "info": {
+      "task_id": "email-paper-homepage",
+      "mcp_servers": [
+        "emails",
+        "github"
+      ],
+      "local_tools": [
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "excel-data-transformation",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please convert the file `Household_Appliances.xlsx` from its current two-dimensional layout\u2014where sales data for household refrigerators, air conditioners, and washing machines are recorded in separate columns\u2014into a one-dimensional format. The new layout must strictly follow the structure an d examples shown in `Format_Example.xlsx`, leaving any unknown fields blank.  \n\nSave the transformed data as `Processed.xlsx` in the workspace. List the records in reverse chronological order, starting from December 2024 and moving backward, and include only months with at least some data.  "
+      }
+    ],
+    "info": {
+      "task_id": "excel-data-transformation",
+      "mcp_servers": [
+        "excel",
+        "filesystem",
+        "terminal"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
     }
   },
   {
     "task_id": "excel-market-research",
-    "domain": "business",
     "prompt": [
       {
         "role": "system",
@@ -375,6 +690,7 @@
       }
     ],
     "info": {
+      "task_id": "excel-market-research",
       "mcp_servers": [
         "excel",
         "filesystem",
@@ -386,346 +702,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "inventory-sync",
-    "domain": "business",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "I am a WooCommerce store owner, and my shop has warehouses in the following cities: New York, Boston, Dallas, LA, San Francisco, Houston. Please help me: Check each warehouse SQLite database (located in the warehouse directory in the workspace) for the latest product inventory list (identified by Product ID) that has been uploaded but not yet updated in the online WooCommerce store. Use the WooCommerce MCP server to synchronize the inventory updates to the WooCommerce online store according to the city-to-region mapping. "
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "woocommerce",
-        "filesystem"
-      ],
-      "local_tools": [
-        "claim_done",
-        "python_execute",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": false
-    }
-  },
-  {
-    "task_id": "meeting-assign",
-    "domain": "business",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Please read the content from localhost:30137 and summarize the information, providing each person's available time slots. Analyze team members' calendar availability and automatically recommend one 2-hour weekly meeting slot. Send the schedule arrangement to meeting administrator [jjones@mcp.com](mailto:jjones@mcp.com). The email content should include the meeting time (in a format like \"Monday 9:00 AM to 11:00 AM every week\") and the names of all participants. You need to follow the content format in `format.md`.\n\n"
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "fetch",
-        "emails",
-        "playwright_with_chunk",
-        "filesystem"
-      ],
-      "local_tools": [
-        "claim_done",
-        "web_search",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": false
-    }
-  },
-  {
-    "task_id": "filter-low-selling-products",
-    "domain": "ecommerce",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Please help me check which products are in my shop, filter out those that have been in stock for more than 90 days and have sold fewer than 10 units in the past 30 days. Move them to a product category named \"Outlet/Clearance\" (\"/\" is part of the name). Also, send an email to each of the subscribed customers.\n\nYou can find the email template under the workspace (please sort the products by stock-in time from earliest to latest; if the stock-in time is the same, then sort by discount ratio from small to large). The subscriber information is in subscriber.json."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "woocommerce",
-        "filesystem",
-        "emails"
-      ],
-      "local_tools": [
-        "claim_done",
-        "handle_overlong_tool_outputs",
-        "python_execute",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "update-material-inventory",
-    "domain": "ecommerce",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Please help me monitor new paid orders in WooCommerce, retrieve the SKU and quantity of each finished product in the order, then, based on the Bill of Materials (BOM) recorded in Google Sheets, calculate the amount of raw materials that need to be consumed. Deduct the corresponding quantities from the raw material inventory table in Google Sheets, write the updated raw material inventory back to Google Sheets, and then, based on the updated raw material balances, recalculate the maximum producible quantities for all finished products. Finally, sync these maximum producible quantities to WooCommerce as the available stock for the products."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "google_sheet",
-        "woocommerce"
-      ],
-      "local_tools": [
-        "claim_done",
-        "python_execute",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "woocommerce-customer-survey",
-    "domain": "ecommerce",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Use the WooCommerce to check all order status updates for customers marked as \"Completed\", and send a Google Forms feedback questionnaire about their experience to the customers\u2019 email addresses.\nThe requirements for constructing the questionnaire can be found in form_requiremente.md in the workspace.\nAlso, store the Google Drive link corresponding to the Google Form (e.g., https://drive.google.com/open?id=...) in the workspace file drive_url.txt."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "woocommerce",
-        "emails",
-        "google_forms",
-        "filesystem"
-      ],
-      "local_tools": [
-        "claim_done",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "flagged-transactions",
-    "domain": "finance",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Perform anomaly detection on high-net-worth clients\u2019 transactions: Extract the 2025 transactions of clients in `high_value_clients.csv` from BigQuery \u00a0`all_transactions.recordings` and mark the abnormal transactions with `amount > mean + 3*std` for each client, and fill them into \u00a0`anomaly_audit_report.xlsx`, the result should be sorted by the \"transaction_id\" (remove the sample data  \nbefore adding results).\n\n"
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "google-cloud",
-        "excel",
-        "terminal",
-        "filesystem"
-      ],
-      "local_tools": [
-        "python_execute",
-        "claim_done",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "gdp-cr5-analysis",
-    "domain": "finance",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Please read the table titled \"GDP2022\" in Google Sheets and calculate the CR5 index for each of the seven major regions listed by the World Bank. Create a new spreadsheet in Google Sheets, name it \"GDP CR5 Analysis\", and within it, create a new table titled \"gdp_cr5_analysis\". Save the following data with headers being `Region`, `Top5_Countries`, `Top5_GDP_Sum`, `Region_GDP_Total`, and `CR5_Ratio`, where they represent the region name, the top five countries (use exactly the full names in existing sheet and separated by \"/\", from highest to lowest), the sum of the top five countries' GDP, the total regional GDP, and the CR5 index (percentage, rounded to two decimal places). Sort the data in descending order by CR5 index. \n\nNote: You should strictly following the country classification provided by the World Bank. If one region has less than 5 countries, you just consider the real number of countries in filling the table."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "google_sheet",
-        "playwright_with_chunk",
-        "fetch"
-      ],
-      "local_tools": [
-        "claim_done",
-        "python_execute",
-        "web_search",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": false,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "investment-decision-analysis",
-    "domain": "finance",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "You are an investment analysis assistant. Please use Yahoo Finance to perform financial analysis. Create three separate spreadsheets(Note that these are not three sheets in one file) in the designated folder of Google Sheets with the spreadsheet names the same as the sheet names in the excel file `results.xlsx`. Note that I have filled some contents in the excel, for these parts you much copy them without any change and you just need to fill in the rest cells. Please keep 2 decimals for all floating numbers. Cumulative value assumes $10,000 invested at 2020 year-end. Do not include % mark in the cells as we already write in the headers."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "yahoo-finance",
-        "google_sheet",
-        "excel",
-        "filesystem"
-      ],
-      "local_tools": [
-        "claim_done",
-        "python_execute",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "git-bug-hunt",
-    "domain": "tech",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "In the `LUFFY` Git repository within the workspace, we've identified a serious performance issue introduced by a commit containing the variable 'remove_caching_layer'. You need to find the earliest commit that introduced this variable, get the author's name and email for that commit, and write an email to the author. The subject of the email should be '[URGENT] Performance Issue Investigation Regarding Your Commit'. The body of the email should include the commit hash and the full commit message of the discovered commit, formatted according to the `template.txt` file in the workspace."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "git",
-        "terminal",
-        "filesystem",
-        "emails"
-      ],
-      "local_tools": [
-        "claim_done",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "git-milestone",
-    "domain": "tech",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "In recent days, the total number of repos on GitHub has reached 1B, which is a milestone worth commemorating! I hope you can help me collect information about some special repos to record this historic moment.\n\nI need you to collect information about the following milestone repos:\n- The 1st repo (repo ID: 1)\n- The 1,000th repo (repo ID: 1000)\n- The 1,000,000th repo (repo ID: 1000000)\n- The 1,000,000,000th repo (repo ID: 1000000000)\n\nPlease save this information to a file named github_info.json. If information for a certain repo doesn't exist or is inaccessible, please skip that repo in the output json file.\n\nFormat:\n```json\n{\n    \"repo_id\":{\n        \"key_0\": \"xxxx\",\n        \"key_1\": \"xxxx\"\n    }\n}\n```\n\nFor each repo, please collect the following information (use the keys below in the JSON file):\n- repo_name (repository name)\n- owner (owner username)\n- star_count (number of stars, integer value)\n- fork_count (number of forks, integer value)\n- creation_time (creation time, ISO 8601 format with Z suffix, accurate to seconds)\n- description (description)\n- language (primary programming language)\n- repo_url (repository URL)"
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "filesystem",
-        "terminal",
-        "fetch"
-      ],
-      "local_tools": [
-        "claim_done",
-        "python_execute",
-        "web_search",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": false,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "git-repo",
-    "domain": "tech",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "I'm trying to reproduce the experiments from a deep learning paper (paper.pdf). Unfortunately, the paper does not provide an official implementation code repository. To work more efficiently, please help me find the unofficial implementation repository with the most stars on GitHub and update the existing `result.json` with the information."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "github",
-        "filesystem",
-        "pdf-tools"
-      ],
-      "local_tools": [
-        "claim_done",
-        "handle_overlong_tool_outputs",
-        "manage_context",
-        "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
     "task_id": "experiments-recordings",
-    "domain": "other",
     "prompt": [
       {
         "role": "system",
@@ -737,6 +718,7 @@
       }
     ],
     "info": {
+      "task_id": "experiments-recordings",
       "mcp_servers": [
         "notion",
         "wandb",
@@ -749,14 +731,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": false
+      ]
     }
   },
   {
     "task_id": "fillout-online-forms",
-    "domain": "other",
     "prompt": [
       {
         "role": "system",
@@ -768,6 +747,7 @@
       }
     ],
     "info": {
+      "task_id": "fillout-online-forms",
       "mcp_servers": [
         "playwright_with_chunk",
         "memory",
@@ -778,14 +758,11 @@
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
-    "task_id": "hk-top-conf",
-    "domain": "other",
+    "task_id": "filter-low-selling-products",
     "prompt": [
       {
         "role": "system",
@@ -793,62 +770,27 @@
       },
       {
         "role": "user",
-        "content": "I'm a third-year undergraduate student majoring in Computer Science, and I plan to pursue a Ph.D. in Deep Learning in Hong Kong after graduation. My target universities are the University of Hong Kong (HKU), the Chinese University of Hong Kong (CUHK), and the Hong Kong University of Science and Technology (HKUST). However, I'm unsure which of these universities has the strongest research capabilities in the field of Deep Learning.\n\nI need your help to count the number of papers from these three universities where the first author's affiliation is one of these institutions, specifically from the main conferences of ICML 2024, NeurIPS 2024, and ICLR 2025. For each university, please also provide a breakdown of poster, spotlight, and oral presentations.\n\nFinally, please provide the results in a markdown table (with columns: University, Poster, Spotlight, Oral, Total in order), sorted in descending order by the Total number of papers of each university. Please save this table as `result.md`(The document should only contain the corresponding table, and the table should not contain redundant or unnecessary rows or columns)."
+        "content": "Please help me check which products are in my shop, filter out those that have been in stock for more than 90 days and have sold fewer than 10 units in the past 30 days. Move them to a product category named \"Outlet/Clearance\" (\"/\" is part of the name). Also, send an email to each of the subscribed customers.\n\nYou can find the email template under the workspace (please sort the products by stock-in time from earliest to latest; if the stock-in time is the same, then sort by discount ratio from small to large). The subscriber information is in subscriber.json."
       }
     ],
     "info": {
+      "task_id": "filter-low-selling-products",
       "mcp_servers": [
+        "woocommerce",
         "filesystem",
-        "terminal",
-        "playwright_with_chunk",
-        "fetch"
+        "emails"
       ],
       "local_tools": [
         "claim_done",
-        "manage_context",
-        "history",
+        "handle_overlong_tool_outputs",
         "python_execute",
-        "web_search",
-        "handle_overlong_tool_outputs"
-      ],
-      "has_initial_workspace": false,
-      "has_groundtruth": true
-    }
-  },
-  {
-    "task_id": "identify-all-songs",
-    "domain": "other",
-    "prompt": [
-      {
-        "role": "system",
-        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
-      },
-      {
-        "role": "user",
-        "content": "Please help me find the YouTube video titled ' Top hits 2024 playlist Trending music 2024 Best songs 2024 updated weekly (Playlist Hits)', identify the names of each song from the lyrics, and write them to a file named `songs.md`. The format should reference `format.md` in the workspace."
-      }
-    ],
-    "info": {
-      "mcp_servers": [
-        "filesystem",
-        "youtube-transcript",
-        "playwright_with_chunk",
-        "fetch"
-      ],
-      "local_tools": [
-        "web_search",
-        "claim_done",
-        "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
-    "task_id": "imagenet",
-    "domain": "other",
+    "task_id": "find-alita-paper",
     "prompt": [
       {
         "role": "system",
@@ -856,27 +798,26 @@
       },
       {
         "role": "user",
-        "content": "I am a graduate student in computer vision, and I have several papers on image generation in my workspace. I need your help to summarize the experimental results of the models in these papers on ImageNet 256 and store the results in a LaTeX table. The table should include: Model Name (When multiple models are included, report the one with the lowest FID result in the paper.), Method Category (determine if it belongs to VAE, GAN, Diffusion, Flow-based, or AR), Model Parameters, FID-50K, and Inception Score. Finally, please save the results in survey.tex in my workspace (only the LaTeX table source code is needed), and the order of the table should be in descending order of FID. The example structure of the table is format.tex."
+        "content": "I'm looking for a paper on arxiv related to agentic reasoning. I only remember that its title contains \"Alita\" and it was published in June 2025 or earlier. Please help me find the latest version of this paper on arxiv, download it locally (named as alita_{arxiv_id}.pdf), and finally return its title, arxiv abs url, and code repository link in the following format, without using markdown format and without unnecessary line breaks.\n\ntitle: {title}\narxiv_abs_url: {arxiv_abs_url}\ncode_url: {code_url}"
       }
     ],
     "info": {
+      "task_id": "find-alita-paper",
       "mcp_servers": [
+        "arxiv_local",
         "filesystem",
-        "pdf-tools"
+        "scholarly"
       ],
       "local_tools": [
         "claim_done",
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": true,
-      "has_groundtruth": true
+      ]
     }
   },
   {
-    "task_id": "inter-final-performance-analysis",
-    "domain": "other",
+    "task_id": "flagged-transactions",
     "prompt": [
       {
         "role": "system",
@@ -884,27 +825,24 @@
       },
       {
         "role": "user",
-        "content": "I would like to know Inter Milan's performance in the 2023 and 2025 Champions League finals. Please help me strictly fill in the three sheets in the inter_ucl_finals_23_25 spreadsheet on Google Sheets (the required data is listed in the table; please do not make any arbitrary changes to the column names or row names) based on the data from the official UEFA website. After all the data pulling and verification are completed, directly write the read-only link of the completed Google Sheet into the sheet_url.txt file. When filling in the data, round numerical values to the nearest whole number unless otherwise specified. For \u201cAvg age of starting lineup\u201d and \u201cAvg age of team\u201d (and the differences of these two fields), compute the average age at the time of the game and round the result to one decimal place. Note that the values in the \u201cStatsDifference\u201d sheet are calculated by subtracting the 2023 data from the 2025 data for the same metrics."
+        "content": "Perform anomaly detection on high-net-worth clients\u2019 transactions: Extract the 2025 transactions of clients in `high_value_clients.csv` from BigQuery \u00a0`all_transactions.recordings` and mark the abnormal transactions with `amount > mean + 3*std` for each client, and fill them into \u00a0`anomaly_audit_report.xlsx`, the result should be sorted by the \"transaction_id\" (remove the sample data  \nbefore adding results).\n\n"
       }
     ],
     "info": {
+      "task_id": "flagged-transactions",
       "mcp_servers": [
-        "filesystem",
-        "playwright_with_chunk",
-        "google_sheet",
+        "google-cloud",
+        "excel",
         "terminal",
-        "fetch"
+        "filesystem"
       ],
       "local_tools": [
-        "claim_done",
         "python_execute",
-        "web_search",
+        "claim_done",
         "handle_overlong_tool_outputs",
         "manage_context",
         "history"
-      ],
-      "has_initial_workspace": false,
-      "has_groundtruth": true
+      ]
     }
   }
 ]

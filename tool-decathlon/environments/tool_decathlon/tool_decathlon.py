@@ -3,7 +3,7 @@ Tool Decathlon environment for verifiers.
 
 Thin wrapper over Toolathlon's infrastructure. We just provide glue code to:
 1. Load Toolathlon tasks as a verifiers dataset
-2. Run tasks in prime-sandboxes (isolated Docker containers)
+2. Run tasks in isolated Docker containers
 3. Extract rewards from Toolathlon's eval scripts
 
 Everything else (MCPs, tools, evaluation) is handled by Toolathlon.
@@ -17,11 +17,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import docker
 import verifiers as vf
 from datasets import Dataset, load_from_disk
 from loguru import logger
 from openai.types.chat import ChatCompletionMessageToolCall
-from prime_sandboxes import Sandbox
 
 
 class ToolDecathlonEnv(vf.ToolEnv):
@@ -43,7 +43,6 @@ class ToolDecathlonEnv(vf.ToolEnv):
         dataset_path: Path to preprocessed Toolathlon dataset
         toolathlon_image: Docker image with Toolathlon pre-configured
         max_turns: Maximum turns per episode
-        domains: Filter tasks by domain
     """
     
     def __init__(
@@ -51,7 +50,6 @@ class ToolDecathlonEnv(vf.ToolEnv):
         dataset_path: Optional[str] = None,
         toolathlon_image: str = "toolathlon:latest",
         max_turns: int = 100,
-        domains: Optional[List[str]] = None,
         **kwargs,
     ):
         env_dir = Path(__file__).parent
@@ -67,7 +65,18 @@ class ToolDecathlonEnv(vf.ToolEnv):
             )
         
         self.toolathlon_image = toolathlon_image
-        eval_dataset = self._load_dataset(dataset_path, domains)
+        
+        # Initialize Docker client
+        try:
+            self.docker_client = docker.from_env()
+            logger.info("Docker client initialized")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to connect to Docker: {e}\n"
+                "Make sure Docker is installed and running."
+            )
+        
+        eval_dataset = self._load_dataset(dataset_path)
         rubric = self._create_rubric()
         
         super().__init__(
@@ -78,12 +87,9 @@ class ToolDecathlonEnv(vf.ToolEnv):
             **kwargs,
         )
     
-    def _load_dataset(self, path: str, domains: Optional[List[str]]) -> Dataset:
+    def _load_dataset(self, path: str) -> Dataset:
         """Load Toolathlon tasks as verifiers dataset."""
-        dataset = load_from_disk(path)
-        if domains:
-            dataset = dataset.filter(lambda x: x["domain"] in domains)
-        return dataset
+        return load_from_disk(path)
     
     def _create_rubric(self) -> vf.Rubric:
         """
@@ -122,56 +128,60 @@ class ToolDecathlonEnv(vf.ToolEnv):
         Creates a sandbox with Toolathlon pre-configured and starts
         the task-specific infrastructure (MCPs, workspace, etc).
         """
-        info = state.get("info", {})
-        task_id = info.get("task_id", state.get("task_id", "unknown"))
-        
-        logger.info(f"Setting up sandbox for task: {task_id}")
-        
-        # Create isolated sandbox
-        # Toolathlon is pre-installed in the image
-        sandbox = await Sandbox.acreate(
-            image=self.toolathlon_image,
-            timeout=3600,  # 1 hour per task
-            cpu=2,
-            memory_gb=4,
+        # Extract task_id - verifiers passes the full dataset row as state initially
+        # Check multiple locations for robustness
+        task_id = (
+            state.get("task_id") or 
+            state.get("info", {}).get("task_id") or
+            state.get("task", "unknown")
         )
         
-        state["sandbox"] = sandbox
+        logger.info(f"Setting up Docker container for task: {task_id}")
+        
+        # Create Docker container
+        container = self.docker_client.containers.run(
+            self.toolathlon_image,
+            command="/bin/bash -c 'tail -f /dev/null'",  # Keep alive
+            name=f"toolathlon-{task_id}-{asyncio.get_event_loop().time()}",
+            detach=True,
+            remove=True,  # Auto-remove when stopped
+            mem_limit="4g",
+            cpu_count=2,
+        )
+        
+        state["container"] = container
         state["task_id"] = task_id
         state["task_done"] = False
         state["eval_result"] = None
         
-        # Initialize Toolathlon task in sandbox
-        # This runs their setup scripts which:
-        # - Start required MCP servers
-        # - Create workspace
-        # - Setup initial files
-        init_script = f"""
-        cd /toolathlon
-        export TOOLATHLON_TASK_ID={task_id}
-        
-        # Their setup handles everything
-        python -c "
-from main import setup_task
-task = setup_task('{task_id}')
-print('READY')
-        "
-        """
-        
-        result = await sandbox.run(init_script)
-        if "READY" not in result.stdout:
-            raise RuntimeError(f"Toolathlon setup failed: {result.stderr}")
-        
-        # Get tools from Toolathlon's MCPs
-        # (They expose them via their API)
-        tools_json = await sandbox.run(
-            f"cd /toolathlon && python -c \"from main import get_task_tools; import json; print(json.dumps(get_task_tools('{task_id}')))\""
+        # Initialize Toolathlon task in container
+        # Our task_api.py wrapper starts MCPs and returns tools
+        exit_code, output = container.exec_run(
+            f"cd /toolathlon && python task_api.py setup {task_id}",
+            demux=False,
         )
-        tools = json.loads(tools_json.stdout)
+        
+        if exit_code != 0:
+            container.stop()
+            raise RuntimeError(f"Task setup failed: {output.decode()}")
+        
+        # Parse setup response
+        setup_data = json.loads(output.decode())
+        tools = setup_data.get("tools", [])
+        
+        # Add claim_done tool
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "claim_done",
+                "description": "Call when task is complete",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })
         
         state["info"]["oai_tools"] = tools
         
-        logger.info(f"Sandbox ready with {len(tools)} tools")
+        logger.info(f"Container ready with {len(tools)} tools")
         return state
     
     async def is_completed(self, messages: vf.Messages, state: vf.State, **kwargs) -> bool:
@@ -193,7 +203,11 @@ print('READY')
         responses = []
         last_msg = messages[-1] if messages else {}
         tool_calls = last_msg.get("tool_calls", [])
-        sandbox = state["sandbox"]
+        container = state.get("container")
+        
+        if not container:
+            logger.error("No container in state")
+            return [], state
         
         for tc in tool_calls:
             # Parse tool call
@@ -211,27 +225,21 @@ print('READY')
             except json.JSONDecodeError:
                 args = {}
             
-            # Execute in sandbox
+            # Execute in Docker container via task_api
             if name == "claim_done":
-                # Task completion - run Toolathlon's eval
+                # Task completion - run eval
                 state["task_done"] = True
-                eval_result = await self._run_toolathlon_eval(sandbox, state)
+                eval_result = self._run_toolathlon_eval(container, state)
                 state["eval_result"] = eval_result
                 result = f"Task evaluation: {'SUCCESS' if eval_result else 'FAILED'}"
             
             else:
-                # Delegate to Toolathlon's MCPs
-                exec_script = f"""
-                cd /toolathlon
-                python -c "
-from main import execute_tool
-import json
-result = execute_tool('{name}', {json.dumps(args)})
-print(json.dumps(result))
-                "
-                """
-                exec_result = await sandbox.run(exec_script)
-                result = json.loads(exec_result.stdout)
+                # Execute tool via task_api
+                exit_code, output = container.exec_run(
+                    f'cd /toolathlon && python task_api.py execute "{name}" \'{json.dumps(args)}\'',
+                    demux=False,
+                )
+                result = output.decode().strip() if exit_code == 0 else f"Error: {output.decode()}"
             
             responses.append({
                 "role": "tool",
@@ -241,49 +249,44 @@ print(json.dumps(result))
         
         return responses, state
     
-    async def _run_toolathlon_eval(self, sandbox: Sandbox, state: vf.State) -> bool:
+    def _run_toolathlon_eval(self, container, state: vf.State) -> bool:
         """
-        Run Toolathlon's evaluation script in sandbox.
+        Run Toolathlon's evaluation script via task_api.
         
         Returns True if task succeeded, False otherwise.
-        This is where you can later modify eval scripts for dense rewards.
+        Future: Modify eval scripts for dense rewards.
         """
-        task_id = state["task_id"]
+        exit_code, output = container.exec_run(
+            "cd /toolathlon && python task_api.py evaluate",
+            demux=False,
+        )
         
-        eval_script = f"""
-        cd /toolathlon
-        python -c "
-from tasks.finalpool.{task_id}.evaluator import evaluate
-import os
-workspace = os.path.join('/toolathlon/agent_workspace', '{task_id}')
-result = evaluate(workspace)
-print('SUCCESS' if result else 'FAILED')
-        "
-        """
+        if exit_code != 0:
+            logger.error(f"Eval failed: {output.decode()}")
+            return False
         
         try:
-            result = await sandbox.run(eval_script)
-            return "SUCCESS" in result.stdout
+            result_data = json.loads(output.decode())
+            return result_data.get("success", False)
         except Exception as e:
-            logger.error(f"Eval failed: {e}")
+            logger.error(f"Failed to parse eval result: {e}")
             return False
     
     async def cleanup_state(self, state: vf.State, **kwargs):
-        """Cleanup sandbox (destroys entire task environment)."""
-        sandbox = state.get("sandbox")
-        if sandbox:
+        """Cleanup Docker container (destroys entire task environment)."""
+        container = state.get("container")
+        if container:
             try:
-                await sandbox.adelete()
-                logger.info(f"Cleaned up sandbox for {state.get('task_id')}")
+                container.stop()
+                logger.info(f"Cleaned up container for {state.get('task_id')}")
             except Exception as e:
-                logger.warning(f"Sandbox cleanup failed: {e}")
+                logger.warning(f"Container cleanup failed: {e}")
 
 
 def load_environment(
     dataset_path: Optional[str] = None,
     toolathlon_image: str = "toolathlon:latest",
     max_turns: int = 100,
-    domains: Optional[List[str]] = None,
     **kwargs,
 ) -> ToolDecathlonEnv:
     """
@@ -293,10 +296,9 @@ def load_environment(
     (MCPs, eval, etc) is done by their infrastructure in sandboxes.
     
     Args:
-        dataset_path: Path to Toolathlon dataset
+        dataset_path: Path to Toolathlon dataset  
         toolathlon_image: Docker image with Toolathlon setup
         max_turns: Max turns per task
-        domains: Filter by task domain
     
     Example:
         env = load_environment()
@@ -311,6 +313,5 @@ def load_environment(
         dataset_path=dataset_path,
         toolathlon_image=toolathlon_image,
         max_turns=max_turns,
-        domains=domains,
         **kwargs,
     )

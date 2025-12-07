@@ -35,6 +35,11 @@ if [ ! -d "$TOOLATHLON_DIR" ]; then
     git clone https://github.com/hkust-nlp/Toolathlon.git "$TOOLATHLON_DIR"
 fi
 
+# Copy task API wrapper BEFORE cd
+log_info "Adding task API wrapper..."
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cp "$PROJECT_ROOT/docker/task_api.py" "$TOOLATHLON_DIR/task_api.py"
+
 cd "$TOOLATHLON_DIR"
 
 # Create Dockerfile for sandboxes
@@ -76,50 +81,8 @@ RUN bash global_preparation/pull_toolathlon_image.sh || true
 # Create workspace directory
 RUN mkdir -p /toolathlon/agent_workspace
 
-# Expose API for task management
-COPY <<'PYTHON' /toolathlon/api.py
-"""
-Simple API to run Toolathlon tasks.
-This is the interface that prime-sandboxes will call.
-"""
-import json
-import sys
-from pathlib import Path
-
-def setup_task(task_id: str):
-    """Setup a Toolathlon task (start MCPs, create workspace, etc)."""
-    # Implementation will use Toolathlon's main.py
-    from main import TaskRunner
-    runner = TaskRunner(task_id)
-    runner.setup()
-    return {"status": "ready", "task_id": task_id}
-
-def get_task_tools(task_id: str):
-    """Get tools available for this task."""
-    from main import TaskRunner
-    runner = TaskRunner(task_id)
-    return runner.get_tools()
-
-def execute_tool(tool_name: str, args: dict):
-    """Execute a tool call."""
-    from main import TaskRunner
-    runner = TaskRunner.current()  # Get active runner
-    return runner.execute_tool(tool_name, args)
-
-if __name__ == "__main__":
-    cmd = sys.argv[1]
-    if cmd == "setup":
-        print(json.dumps(setup_task(sys.argv[2])))
-    elif cmd == "tools":
-        print(json.dumps(get_task_tools(sys.argv[2])))
-    elif cmd == "execute":
-        print(json.dumps(execute_tool(sys.argv[2], json.loads(sys.argv[3]))))
-PYTHON
-
 WORKDIR /toolathlon
-
-# Default command
-CMD ["python3", "api.py"]
+CMD ["/bin/bash"]
 EOF
 
 log_info "Building Docker image..."

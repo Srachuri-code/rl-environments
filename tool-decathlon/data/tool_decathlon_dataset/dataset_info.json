@@ -6,10 +6,6 @@
       "dtype": "string",
       "_type": "Value"
     },
-    "domain": {
-      "dtype": "string",
-      "_type": "Value"
-    },
     "prompt": {
       "feature": {
         "content": {
@@ -24,14 +20,6 @@
       "_type": "List"
     },
     "info": {
-      "has_groundtruth": {
-        "dtype": "bool",
-        "_type": "Value"
-      },
-      "has_initial_workspace": {
-        "dtype": "bool",
-        "_type": "Value"
-      },
       "local_tools": {
         "feature": {
           "dtype": "string",
@@ -45,6 +33,10 @@
           "_type": "Value"
         },
         "_type": "List"
+      },
+      "task_id": {
+        "dtype": "string",
+        "_type": "Value"
       }
     }
   },
