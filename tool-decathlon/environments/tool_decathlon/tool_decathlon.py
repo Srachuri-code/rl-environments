@@ -14,6 +14,8 @@ GitHub: https://github.com/hkust-nlp/Toolathlon
 
 import asyncio
 import json
+import shlex
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -137,58 +139,75 @@ class ToolDecathlonEnv(vf.ToolEnv):
         )
         
         logger.info(f"Setting up Docker container for task: {task_id}")
-        
+
+        # Generate unique container name
+        container_id = uuid.uuid4().hex[:12]
+        container_name = f"toolathlon-{task_id}-{container_id}"
+
         # Create Docker container (async via thread pool to avoid blocking)
-        loop = asyncio.get_event_loop()
-        container = await loop.run_in_executor(
-            None,
-            lambda: self.docker_client.containers.run(
+        loop = asyncio.get_running_loop()
+
+        def create_container():
+            return self.docker_client.containers.run(
                 self.toolathlon_image,
                 command="/bin/bash -c 'tail -f /dev/null'",  # Keep alive
-                name=f"toolathlon-{task_id}-{asyncio.get_event_loop().time()}",
+                name=container_name,
                 detach=True,
                 remove=True,  # Auto-remove when stopped
                 mem_limit="4g",
                 cpu_count=2,
             )
-        )
-        
+
+        container = await loop.run_in_executor(None, create_container)
+
         state["container"] = container
+        state["container_name"] = container_name
         state["task_id"] = task_id
         state["task_done"] = False
         state["eval_result"] = None
-        
+
+        # Ensure state["info"] exists
+        if "info" not in state:
+            state["info"] = {}
+
         # Initialize Toolathlon task in container (async via thread pool)
         # Our task_api.py wrapper starts MCPs and returns tools
         # Use uv run to execute with Toolathlon's Python environment
-        exit_code, output = await loop.run_in_executor(
-            None,
-            lambda: container.exec_run(
+        def setup_task():
+            return container.exec_run(
                 ["/bin/bash", "-c", f"cd /toolathlon && /root/.local/bin/uv run python task_api.py setup {task_id}"],
                 demux=False,
             )
-        )
-        
+
+        exit_code, output = await loop.run_in_executor(None, setup_task)
+
         if exit_code != 0:
             await loop.run_in_executor(None, container.stop)
             raise RuntimeError(f"Task setup failed: {output.decode()}")
-        
+
         # Parse setup response
-        setup_data = json.loads(output.decode())
+        try:
+            setup_data = json.loads(output.decode())
+        except json.JSONDecodeError as e:
+            await loop.run_in_executor(None, container.stop)
+            raise RuntimeError(f"Failed to parse setup response: {e}\nOutput: {output.decode()}")
+
         tools = setup_data.get("tools", [])
-        
-        # Add claim_done tool
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "claim_done",
-                "description": "Call when task is complete",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        })
-        
+
+        # Add claim_done tool (only if not already present from task_api)
+        tool_names = {t.get("function", {}).get("name") for t in tools}
+        if "claim_done" not in tool_names:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "claim_done",
+                    "description": "Call when task is complete",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            })
+
         state["info"]["oai_tools"] = tools
-        
+
         logger.info(f"Container ready with {len(tools)} tools")
         return state
     
@@ -204,7 +223,7 @@ class ToolDecathlonEnv(vf.ToolEnv):
     ) -> Tuple[vf.Messages, vf.State]:
         """
         Execute tool calls in Toolathlon sandbox.
-        
+
         Tool execution is delegated to Toolathlon's MCP servers
         running inside the sandbox.
         """
@@ -212,11 +231,13 @@ class ToolDecathlonEnv(vf.ToolEnv):
         last_msg = messages[-1] if messages else {}
         tool_calls = last_msg.get("tool_calls", [])
         container = state.get("container")
-        
+
         if not container:
             logger.error("No container in state")
             return [], state
-        
+
+        loop = asyncio.get_running_loop()
+
         for tc in tool_calls:
             # Parse tool call
             if isinstance(tc, ChatCompletionMessageToolCall):
@@ -227,12 +248,12 @@ class ToolDecathlonEnv(vf.ToolEnv):
                 name = tc.get("function", {}).get("name", "")
                 args_str = tc.get("function", {}).get("arguments", "{}")
                 tc_id = tc.get("id", "unknown")
-            
+
             try:
                 args = json.loads(args_str) if isinstance(args_str, str) else args_str
             except json.JSONDecodeError:
                 args = {}
-            
+
             # Execute in Docker container via task_api
             if name == "claim_done":
                 # Task completion - run eval
@@ -240,61 +261,72 @@ class ToolDecathlonEnv(vf.ToolEnv):
                 eval_result = await self._run_toolathlon_eval(container, state)
                 state["eval_result"] = eval_result
                 result = f"Task evaluation: {'SUCCESS' if eval_result else 'FAILED'}"
-            
+
             else:
                 # Execute tool via task_api (async via thread pool)
-                args_json = json.dumps(args).replace("'", "'\\''")  # Escape single quotes for shell
-                loop = asyncio.get_event_loop()
-                exit_code, output = await loop.run_in_executor(
-                    None,
-                    lambda: container.exec_run(
-                        ["/bin/bash", "-c", f"cd /toolathlon && /root/.local/bin/uv run python task_api.py execute '{name}' '{args_json}'"],
+                # Use shlex for proper shell escaping
+                args_json = json.dumps(args)
+
+                # Create closure with captured variables to avoid loop variable issues
+                def execute_tool(tool_name=name, tool_args=args_json):
+                    escaped_name = shlex.quote(tool_name)
+                    escaped_args = shlex.quote(tool_args)
+                    return container.exec_run(
+                        ["/bin/bash", "-c", f"cd /toolathlon && /root/.local/bin/uv run python task_api.py execute {escaped_name} {escaped_args}"],
                         demux=False,
                     )
-                )
-                result = output.decode().strip() if exit_code == 0 else f"Error: {output.decode()}"
-            
+
+                exit_code, output = await loop.run_in_executor(None, execute_tool)
+
+                if exit_code == 0:
+                    result = output.decode().strip()
+                else:
+                    error_msg = output.decode().strip()
+                    logger.warning(f"Tool {name} failed: {error_msg}")
+                    result = f"Error: {error_msg}"
+
             responses.append({
                 "role": "tool",
                 "content": str(result),
                 "tool_call_id": tc_id,
             })
-        
+
         return responses, state
     
     async def _run_toolathlon_eval(self, container, state: vf.State) -> bool:
         """
         Run Toolathlon's evaluation script via task_api.
-        
+
         Returns True if task succeeded, False otherwise.
         Future: Modify eval scripts for dense rewards.
         """
-        loop = asyncio.get_event_loop()
-        exit_code, output = await loop.run_in_executor(
-            None,
-            lambda: container.exec_run(
+        loop = asyncio.get_running_loop()
+
+        def run_eval():
+            return container.exec_run(
                 ["/bin/bash", "-c", "cd /toolathlon && /root/.local/bin/uv run python task_api.py evaluate"],
                 demux=False,
             )
-        )
-        
+
+        exit_code, output = await loop.run_in_executor(None, run_eval)
+
         if exit_code != 0:
             logger.error(f"Eval failed: {output.decode()}")
             return False
-        
+
         try:
             result_data = json.loads(output.decode())
             return result_data.get("success", False)
         except Exception as e:
             logger.error(f"Failed to parse eval result: {e}")
             return False
-    
+
     async def cleanup_state(self, state: vf.State, **kwargs):
         """Cleanup Docker container (destroys entire task environment)."""
         container = state.get("container")
         if container:
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, container.stop)
                 logger.info(f"Cleaned up container for {state.get('task_id')}")
             except Exception as e:
