@@ -1,0 +1,228 @@
+[
+  {
+    "task_id": "arrange-workspace",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please help me organize the files in my workspace. The file structure should be as shown below. \n\n\u251c\u2500\u2500 School\n\u2502   \u251c\u2500\u2500 Courses_Materials\n\u2502   \u251c\u2500\u2500 Graduation_Projects\n\u2502   \u251c\u2500\u2500 Applications_Materials\n\u2502   \u2514\u2500\u2500 Language_Exam_Preparation\n\u251c\u2500\u2500 Work\n\u2502   \u251c\u2500\u2500 Projects\n\u2502   \u251c\u2500\u2500 Software\n|   |\u2014\u2014 Offer_Galary\n|   |\u2014\u2014 Job_Application_Materials \n\u2514\u2500\u2500 Entertainment\n    \u251c\u2500\u2500 Movies\n    \u251c\u2500\u2500 Music\n    \u2514\u2500\u2500 Pictures\n        \u2514\u2500\u2500 Year-2025\n            \u251c\u2500\u2500 People\n            \u251c\u2500\u2500 Landscape\n            \u2514\u2500\u2500 Pets"
+      }
+    ],
+    "info": {
+      "task_id": "arrange-workspace",
+      "mcp_servers": [
+        "filesystem",
+        "terminal",
+        "pdf-tools",
+        "excel"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "cooking-guidance",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Using the ingredients currently available (listed in the ingredients.csv file in the workspace), please recommend 3 dishes \u2014 you may optionally include soup as one of them \u2014 by querying the \"howtocook\" MCP server. Ensure that the selected dishes use as many of our current ingredients as possible, with at least half of the ingredient types coming from our existing stock. Populate the cuisine.json file with the results, strictly following its existing format, and ensure that the dish names are in Chinese, exactly as retrieved from the MCP server. The ingredient amounts for each dish must strictly match the values returned by the MCP server. After selecting the dishes, list any ingredients that are insufficient or missing in order to fully prepare them, and compile these into a shopping list. Save the shopping list as a new file named shopping.csv in the workspace, containing exactly two columns: \"Name\" and \"Quantity\"."
+      }
+    ],
+    "info": {
+      "task_id": "cooking-guidance",
+      "mcp_servers": [
+        "filesystem",
+        "howtocook"
+      ],
+      "local_tools": [
+        "claim_done",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "course-schedule",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "My personal information is stored in Memory. The workspace contains my course schedule and a master exam table (in Excel format). The courses I need to take this semester are in list.txt.\nPlease help me choose the right courses. I can only take one of each course. I have club activities in the evening, so I'll only take daytime courses. Also, my favorite teacher is Yulian(\u90c1\u83b2). if she teaches any required courses, please make sure to take her.\nBased on my personal information, please first help me find the right specific courses. Then, help me find the exams I need to take this semester. Save the exam information in the workspace in a file named exam_schedule.jsonl. The format should refer to `format.md`.\nAll information must match the Excel file. If a course is not required this semester(Course exemption), omit it. Finally, sort the objects in the JSONL file by exam time."
+      }
+    ],
+    "info": {
+      "task_id": "course-schedule",
+      "mcp_servers": [
+        "filesystem",
+        "memory",
+        "excel",
+        "pdf-tools",
+        "fetch"
+      ],
+      "local_tools": [
+        "claim_done",
+        "web_search",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "courses-ta-hws",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please find all files in the workspace that are related to the \"Operating Systems Fundamentals\" course and belong to Assignment 3. Based on the correspondence table between colleges and student IDs, rename these files uniformly as: Name-College-StudentID-OS-HW3. Please maintain the original capitalization and spacing of student names and colleges, and do not arbitrarily add or remove words. After completing the renaming, create a new directory called \"os_hw3/\" , and within this directory, place them into three new subdirectories: \"C\", \"Rust\", and \"Python\" respectively. Please delete all the original code files, including those outside of this course and those not related to the third assignment, after completing the organization process to keep the workspace clean."
+      }
+    ],
+    "info": {
+      "task_id": "courses-ta-hws",
+      "mcp_servers": [
+        "terminal",
+        "excel",
+        "filesystem"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "detect-revised-terms",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please help me read new_law.pdf and each case judgment document, identify any clauses cited that conflict with, are inconsistent with, have been revised by, or repealed under the new law; based on your analysis, generate a list of legal clauses in the judgment documents that need to be amended, and return the results in the following format:\n```\n\u6848\u4ef6\u6587\u4ef6\u540d\u79f0,\u5224\u51b3\u6587\u4e66\u4e2d\u7684\u539f\u59cb\u6761\u6b3e,\u539f\u59cb\u5f15\u7528\u5185\u5bb9,\u65b0\u6cd5\u6761\u6b3e,\u65b0\u6cd5\u6761\u6b3e\u5185\u5bb9\n\"case1.pdf\",\"\u300axx\u6cd5\u300b\u7b2cxx\u6761\uff08\u7b2cxx\u6b3e\uff09\",\"xxx\",\"\u300a\u6c11\u6cd5\u5178\u300b\u7b2cxx\u6761\uff08\u7b2cxx\u6b3e\uff09\",\"xxx\"\n```\nFinally, please write the returned content into the `revised_terms.csv` file."
+      }
+    ],
+    "info": {
+      "task_id": "detect-revised-terms",
+      "mcp_servers": [
+        "filesystem",
+        "pdf-tools"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "dietary-health",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "I am a male university student, and my detailed body information is in `body.md`. I plan to create a fitness plan for the next 3 months, and I am currently at the initial stage of fat loss. Please help me analyze the dietary list of my rest day (located in `cuisine.md`, with all dishes eaten in one portion, use info from howtocook) to determine whether it meets the nutritional requirements of carbohydrates and protein. The nutritional composition of various raw ingredients is provided in `Nutrition.xlsx`, and the fitness dietary guidelines are in `health_guide.md`. Please follow exactly the instructions in format.md to give your nutritional analysis of the foods and record it in a newly created `analysis.md` file."
+      }
+    ],
+    "info": {
+      "task_id": "dietary-health",
+      "mcp_servers": [
+        "filesystem",
+        "howtocook",
+        "excel",
+        "terminal"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "excel-data-transformation",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Please convert the file `Household_Appliances.xlsx` from its current two-dimensional layout\u2014where sales data for household refrigerators, air conditioners, and washing machines are recorded in separate columns\u2014into a one-dimensional format. The new layout must strictly follow the structure an d examples shown in `Format_Example.xlsx`, leaving any unknown fields blank.  \n\nSave the transformed data as `Processed.xlsx` in the workspace. List the records in reverse chronological order, starting from December 2024 and moving backward, and include only months with at least some data.  "
+      }
+    ],
+    "info": {
+      "task_id": "excel-data-transformation",
+      "mcp_servers": [
+        "excel",
+        "filesystem",
+        "terminal"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  },
+  {
+    "task_id": "excel-market-research",
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Accessible workspace directory: !!<<<<||||workspace_dir||||>>>>!!\nWhen processing tasks, if you need to read/write local files and the user provides a relative path, you may choose to combine it with the above workspace directory to get the complete path.\nIf you believe the task is completed, you can either call the `local-claim_done` tool or respond without calling any tool to indicate completion. This will immediately terminate the task, and you will have no further opportunity to work on it."
+      },
+      {
+        "role": "user",
+        "content": "Based on the provided file `Market_Data.xlsx`, calculate the year-over-year growth rate percentage for each segment from 2015 to 2024 according to the segment/source mapping provided in the `Methodology` sheet (rounded to one decimal place), and save the results to a new Excel file named `segment_growth_rates.xlsx` where the first column is `Year` and the subsequent columns are the exact names (excluding `Total`) of segments arranged in the same order as they appear in rows in the `Methodology` sheet."
+      }
+    ],
+    "info": {
+      "task_id": "excel-market-research",
+      "mcp_servers": [
+        "excel",
+        "filesystem",
+        "terminal"
+      ],
+      "local_tools": [
+        "claim_done",
+        "python_execute",
+        "handle_overlong_tool_outputs",
+        "manage_context",
+        "history"
+      ]
+    }
+  }
+]
