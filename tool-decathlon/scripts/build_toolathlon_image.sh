@@ -75,6 +75,10 @@ COPY . .
 # Install dependencies
 RUN bash global_preparation/install_env_minimal.sh false || true
 
+# Install lightweight runtime server deps (for step-by-step RL tool execution)
+# This avoids spawning a new Python process per tool call via `docker exec`.
+RUN /root/.local/bin/uv pip install --python /toolathlon/.venv/bin/python fastapi==0.115.5 uvicorn==0.32.1 httpx==0.27.2 || true
+
 # Pull Toolathlon Docker image (for task containers)
 RUN bash global_preparation/pull_toolathlon_image.sh || true
 
