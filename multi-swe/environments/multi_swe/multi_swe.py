@@ -1018,8 +1018,6 @@ def load_environment(
 
     dataset = load_multi_swe_rl_dataset(dataset_name)
     dataset = dataset.map(process_example)
-    # Filter out C/C++ as in mini_swe_agent_plus
-    dataset = dataset.filter(lambda x: x["lang"] not in ["c", "cpp"])
 
     parser = vf.Parser()
 
