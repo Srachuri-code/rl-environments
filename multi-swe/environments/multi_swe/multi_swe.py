@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any, Literal, Union
 
 import verifiers as vf
-from datasets import Dataset, load_dataset
+from datasets import Dataset
+from huggingface_hub import hf_hub_download, list_repo_files
 from multi_swe_bench.harness.dataset import Dataset as MultiSWEDataset
 from multi_swe_bench.harness.image import Config
 from multi_swe_bench.harness.instance import Instance
@@ -55,6 +56,69 @@ def restore_row(row):
         row[field] = columnar_to_tests(row[field])
     row["resolved_issues"] = columnar_to_resolved_issues(row["resolved_issues"])
     return row
+
+
+def dict_to_columnar_tests(tests_dict):
+    """Convert dict-format tests to columnar format for restore_row compatibility."""
+    if not tests_dict or not isinstance(tests_dict, dict):
+        return {"name": [], "fix": [], "run": [], "test": []}
+    
+    names, fixes, runs, tests = [], [], [], []
+    for name, values in tests_dict.items():
+        names.append(name)
+        fixes.append(values.get("fix", ""))
+        runs.append(values.get("run", ""))
+        tests.append(values.get("test", ""))
+    
+    return {"name": names, "fix": fixes, "run": runs, "test": tests}
+
+
+def dict_to_columnar_resolved_issues(issues):
+    """Convert resolved_issues to columnar format."""
+    if not issues or not isinstance(issues, list):
+        return {"body": [], "number": [], "title": []}
+    
+    bodies, numbers, titles = [], [], []
+    for issue in issues:
+        bodies.append(issue.get("body", ""))
+        numbers.append(issue.get("number", 0))
+        titles.append(issue.get("title", ""))
+    
+    return {"body": bodies, "number": numbers, "title": titles}
+
+
+def load_multi_swe_rl_dataset(dataset_name="ByteDance-Seed/Multi-SWE-RL"):
+    """Load Multi-SWE-RL dataset directly from JSONL files."""
+    files = list_repo_files(dataset_name, repo_type="dataset")
+    jsonl_files = [f for f in files if f.endswith(".jsonl")]
+    
+    all_records = []
+    test_fields = ["fixed_tests", "p2p_tests", "f2p_tests", "s2p_tests", "n2p_tests"]
+    
+    for jsonl_file in jsonl_files:
+        local_path = hf_hub_download(
+            repo_id=dataset_name,
+            filename=jsonl_file,
+            repo_type="dataset"
+        )
+        with open(local_path, "r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                
+                # Convert test fields to columnar format
+                for field in test_fields:
+                    if field in record and isinstance(record[field], dict):
+                        record[field] = dict_to_columnar_tests(record[field])
+                
+                # Convert resolved_issues to columnar format
+                if "resolved_issues" in record and isinstance(record["resolved_issues"], list):
+                    record["resolved_issues"] = dict_to_columnar_resolved_issues(record["resolved_issues"])
+                
+                all_records.append(record)
+    
+    return Dataset.from_list(all_records)
 
 
 def create_instance(dataset: MultiSWEDataset) -> Instance:
@@ -952,7 +1016,7 @@ def load_environment(
             "answer": "",
         }
 
-    dataset = load_dataset(dataset_name, split=split)
+    dataset = load_multi_swe_rl_dataset(dataset_name)
     dataset = dataset.map(process_example)
     # Filter out C/C++ as in mini_swe_agent_plus
     dataset = dataset.filter(lambda x: x["lang"] not in ["c", "cpp"])
