@@ -1,8 +1,976 @@
+"""
+Multi-SWE RL Environment
+
+This environment combines:
+- Multi-SWE dataset from ByteDance-Seed/Multi-SWE-RL (verifiers implementation)
+- Same reward functions as mini_swe_agent_plus
+- OpenHands agent harness (tools/actions)
+"""
+
+import asyncio
+import json
+import pprint
+import shlex
+import traceback
+from pathlib import Path
+from typing import Any, Literal, Union
+
 import verifiers as vf
+from datasets import Dataset, load_dataset
+from multi_swe_bench.harness.dataset import Dataset as MultiSWEDataset
+from multi_swe_bench.harness.image import Config
+from multi_swe_bench.harness.instance import Instance
+from multi_swe_bench.harness.report import Report, generate_report
+from multi_swe_bench.harness.test_result import TestResult
+from prime_sandboxes import APIError, CommandTimeoutError, SandboxNotRunningError
+from tenacity import retry, retry_if_exception, stop_after_delay, wait_exponential
+from verifiers.types import ChatCompletionMessageToolCall, Info, Message, Messages, ProcessedOutputs, State
+
+# ============================================================================
+# Multi-SWE Dataset Utilities (from mini_swe_agent_plus)
+# ============================================================================
 
 
-def load_environment(**kwargs) -> vf.Environment:
-    '''
-    Loads a custom environment.
-    '''
-    raise NotImplementedError("Implement your custom environment here.")
+def columnar_to_tests(entry):
+    """Convert columnar test format to dict format."""
+    return {
+        name: {"fix": fix, "run": run, "test": test}
+        for name, fix, run, test in zip(entry["name"], entry["fix"], entry["run"], entry["test"])
+    }
+
+
+def columnar_to_resolved_issues(entry):
+    """Convert columnar resolved issues format to list format."""
+    return [
+        {"body": body, "number": num, "title": title}
+        for body, num, title in zip(entry["body"], entry["number"], entry["title"])
+    ]
+
+
+def restore_row(row):
+    """Restore row from columnar format to nested format."""
+    row = dict(row)
+    test_fields = ["fixed_tests", "p2p_tests", "f2p_tests", "s2p_tests", "n2p_tests"]
+    for field in test_fields:
+        row[field] = columnar_to_tests(row[field])
+    row["resolved_issues"] = columnar_to_resolved_issues(row["resolved_issues"])
+    return row
+
+
+def create_instance(dataset: MultiSWEDataset) -> Instance:
+    """Create an Instance from a MultiSWEDataset."""
+    config = Config(
+        need_clone=False,
+        global_env=None,
+        clear_env=False,
+    )
+    return Instance.create(
+        pr=dataset,
+        config=config,
+    )
+
+
+def validate_report_against_dataset(report: Report, multiswe_ds: MultiSWEDataset) -> tuple[bool, str | None]:
+    """
+    Validate that a report matches the expected test transitions from the dataset.
+
+    Args:
+        report: The Report object to validate
+        multiswe_ds: The MultiSWEDataset object containing expected test transitions
+
+    Returns:
+        A tuple of (is_valid, error_message)
+    """
+    if not report.valid:
+        return (False, f"Report is not valid: {report.error_msg}")
+
+    # Check p2p_tests (pass-to-pass tests)
+    for p2p in multiswe_ds.p2p_tests:
+        if p2p not in report.p2p_tests:
+            return (
+                False,
+                f"Missing expected p2p_test: {p2p}. Expected {len(multiswe_ds.p2p_tests)} p2p_tests, found {len(report.p2p_tests)}",
+            )
+
+    # Check f2p_tests (fail-to-pass tests) - most critical check
+    for f2p in multiswe_ds.f2p_tests:
+        if f2p not in report.f2p_tests:
+            return (
+                False,
+                f"Missing expected f2p_test: {f2p}. Expected {len(multiswe_ds.f2p_tests)} f2p_tests, found {len(report.f2p_tests)}",
+            )
+
+    # Check s2p_tests (skip-to-pass tests)
+    for s2p in multiswe_ds.s2p_tests:
+        if s2p not in report.s2p_tests:
+            return (
+                False,
+                f"Missing expected s2p_test: {s2p}. Expected {len(multiswe_ds.s2p_tests)} s2p_tests, found {len(report.s2p_tests)}",
+            )
+
+    # Check n2p_tests (none-to-pass tests)
+    for n2p in multiswe_ds.n2p_tests:
+        if n2p not in report.n2p_tests:
+            return (
+                False,
+                f"Missing expected n2p_test: {n2p}. Expected {len(multiswe_ds.n2p_tests)} n2p_tests, found {len(report.n2p_tests)}",
+            )
+
+    return (True, None)
+
+
+# ============================================================================
+# Scripts (embedded for Multi-SWE harness)
+# ============================================================================
+
+CREATE_FIX_PATCH_SCRIPT = '''#!/bin/bash
+# Generate fix.patch from unstaged changes, excluding test files
+
+set -e
+
+REPO_DIR="${1:-$(pwd)}"
+cd "$REPO_DIR"
+
+MODIFIED_FILES=$(git diff --name-only)
+
+if [ -z "$MODIFIED_FILES" ]; then
+    echo "No unstaged changes found. Creating empty patch." >&2
+    touch /home/fix.patch
+    exit 0
+fi
+
+for file in $MODIFIED_FILES; do
+    file_lower=$(echo "$file" | tr '[:upper:]' '[:lower:]')
+    if [[ "$file_lower" == *"test"* ]] || \\
+       [[ "$file_lower" == *"tests"* ]] || \\
+       [[ "$file_lower" == *"e2e"* ]] || \\
+       [[ "$file_lower" == *"testing"* ]]; then
+        echo "Warning: Test files were modified. Creating empty patch." >&2
+        touch /home/fix.patch
+        git restore .
+        exit 0
+    fi
+done
+
+git diff -- $MODIFIED_FILES > /home/fix.patch
+
+if [ ! -s /home/fix.patch ]; then
+    echo "Generated patch is empty. Creating empty patch file." >&2
+    touch /home/fix.patch
+fi
+
+git restore .
+
+echo "Created fix.patch at /home/fix.patch" >&2
+echo "Unstaged changes have been restored." >&2
+'''
+
+# ============================================================================
+# Prompts (OpenHands-style)
+# ============================================================================
+
+SYSTEM_PROMPT = """You are OpenHands agent, a helpful AI assistant that can interact with a computer to solve tasks.
+<IMPORTANT>
+* If user provides a path, you should NOT assume it's relative to the current working directory. Instead, you should explore the file system to find the file before working on it.
+* The assistant MUST NOT include comments in the code unless they are necessary to describe non-obvious behavior.
+</IMPORTANT>
+"""
+
+PROMPT_TEMPLATE = """<uploaded_files>
+/home/{repo}
+</uploaded_files>
+
+I've uploaded a code repository in the directory {repo}. Consider the following issue description:
+
+<issue_description>
+{problem_statement}
+</issue_description>
+
+Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
+
+I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+
+Also the development environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+
+Your task is to make the minimal changes to non-test files in the /home/{repo} directory to ensure the <issue_description> is satisfied.
+
+Follow these steps to resolve the issue:
+1. As a first step, it might be a good idea to explore the repo to familiarize yourself with its structure.
+2. Create a script to reproduce the error and execute it with the appropriate command using the bash tool, to confirm the error.
+3. Edit the sourcecode of the repo to resolve the issue.
+4. Rerun your reproduce script and confirm that the error is fixed!
+5. Think about edgecases, add comprehensive tests for them in your reproduce script, and run them to make sure your fix handles them as well.
+
+When you are done, use the submit tool to submit your changes.
+
+Your thinking should be thorough and so it's fine if it's very long.
+"""
+
+ACTION_OBSERVATION_TEMPLATE = """<returncode>{exit_code}</returncode>
+<output>
+{output}
+</output>"""
+
+FORMAT_ERROR_TEMPLATE = """Please provide EXACTLY ONE tool call, found {num_actions} tool calls.
+
+If you have completed your assignment, please use the submit tool to submit your solution."""
+
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+
+def _is_503_error(exception: Exception) -> bool:
+    """Check if exception is an APIError with HTTP 503 status."""
+    if isinstance(exception, APIError):
+        error_str = str(exception)
+        return "503" in error_str or "HTTP 503" in error_str
+    return False
+
+
+# Environment variables for sandbox
+PATH = "PATH=/testbed/.venv/bin:/root/.local/bin:/root/.cargo/bin:/go/bin:/usr/local/go/bin:/usr/local/cargo:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ENV_VARS = f"{PATH};PAGER=cat;MANPAGER=cat;LESS=-R;PIP_PROGRESS_BAR=off;TQDM_DISABLE=1;"
+
+
+# ============================================================================
+# Main Environment Class
+# ============================================================================
+
+
+class MultiSWEOpenHandsEnv(vf.SandboxEnv):
+    """
+    Multi-SWE RL Environment with OpenHands agent harness.
+
+    Combines:
+    - Multi-SWE dataset from ByteDance-Seed/Multi-SWE-RL
+    - Reward functions from mini_swe_agent_plus
+    - OpenHands-style tools (execute_bash, execute_ipython_cell, str_replace_editor, file_read)
+    """
+
+    def __init__(
+        self,
+        dataset: Any,
+        system_prompt: str,
+        parser: vf.Parser,
+        rubric: vf.Rubric,
+        max_turns: int = 200,
+        turn_timeout: int = 90,
+        test_timeout: int = 1800,
+        total_timeout_minutes: int = 120,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            dataset=dataset,
+            system_prompt=system_prompt,
+            parser=parser,
+            rubric=rubric,
+            sandbox_name="multi-swe-openhands-sandbox",
+            start_command="tail -f /dev/null",
+            cpu_cores=8,
+            memory_gb=8,
+            disk_size_gb=10,
+            timeout_minutes=total_timeout_minutes,
+            max_turns=max_turns,
+            **kwargs,
+        )
+
+        self.turn_timeout = turn_timeout
+        self.test_timeout = test_timeout
+
+        # Remove default bash tool and add OpenHands-style tools
+        self.remove_tool(self.bash)
+        self.add_tool(self.execute_bash, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
+        self.add_tool(self.execute_ipython_cell, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
+        self.add_tool(self.str_replace_editor, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
+        self.add_tool(self.file_read, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
+        self.add_tool(self.submit, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
+
+    # ========================================================================
+    # Command execution helpers
+    # ========================================================================
+
+    @retry(
+        retry=retry_if_exception(_is_503_error),
+        stop=stop_after_delay(180),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
+        reraise=True,
+    )
+    async def _execute_command(
+        self, command: str, sandbox_id: str, timeout: int = 90, working_dir: str = None
+    ) -> tuple[int, str]:
+        """Execute command inside persistent sandbox container."""
+        self.logger.debug(f"Executing command {command} in sandbox {sandbox_id}")
+        try:
+            results = await self.sandbox_client.execute_command(
+                sandbox_id, command, timeout=timeout, working_dir=working_dir
+            )
+        except CommandTimeoutError:
+            self.logger.warning(f"Command timed out after {timeout}s: {command}")
+            return (
+                -1,
+                f"The command timed out after {timeout}s and has been killed. Please try a different command.",
+            )
+        except Exception as e:
+            if _is_503_error(e):
+                self.logger.warning(f"HTTP 503 error, will retry: {repr(e)}")
+                raise
+            self.logger.error(f"Execution error: {repr(e)}")
+            self.logger.error(traceback.format_exc())
+            return (1, "Command failed due to infrastructure error. Try the same command again!")
+
+        stdout = results.stdout.strip()
+        stderr = (results.stderr or "").strip()
+        combined = stdout
+        if stderr:
+            if combined:
+                combined = f"{combined}\nstderr:\n{stderr}"
+            else:
+                combined = f"stderr:\n{stderr}"
+        output = combined or "(no output)"
+        return results.exit_code, output
+
+    async def execute_command_raise_on_error(
+        self, sandbox_id: str, command: str, working_dir: str = None, timeout: int = 90
+    ):
+        """Execute command and raise on error."""
+        results = await self.sandbox_client.execute_command(
+            sandbox_id, command, working_dir=working_dir, timeout=timeout
+        )
+        if results.exit_code != 0:
+            raise RuntimeError(
+                f"Error executing command: {command} {results.exit_code=} {results.stdout=} {results.stderr=}"
+            )
+        return results
+
+    # ========================================================================
+    # OpenHands-style Tools
+    # ========================================================================
+
+    async def execute_bash(
+        self,
+        command: str,
+        is_input: str = "false",
+        sandbox_id: str | None = None,
+        turn_timeout: int = 90,
+        working_dir: str = None,
+    ) -> str:
+        """
+        Execute a bash command in the terminal.
+
+        Args:
+            command: The bash command to execute. Can be empty string to view additional logs when previous exit code is `-1`. Can be `C-c` (Ctrl+C) to interrupt the currently running process.
+            is_input: If 'true', the command is an input to the running process. If 'false', the command is a bash command to be executed in the terminal. Default is 'false'.
+        """
+        if sandbox_id is None:
+            raise ValueError("sandbox_id is required for execute_bash")
+
+        # Handle special inputs
+        if is_input == "true":
+            # For interactive input, we append to the running process
+            cmd = f"echo {shlex.quote(command)}"
+        else:
+            cmd = command
+
+        full_cmd = f"{ENV_VARS} {cmd}"
+        exit_code, output = await self._execute_command(full_cmd, sandbox_id, turn_timeout, working_dir=working_dir)
+
+        # Truncate long outputs
+        if len(output) > 10000:
+            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
+
+        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
+
+    async def execute_ipython_cell(
+        self,
+        code: str,
+        sandbox_id: str | None = None,
+        turn_timeout: int = 90,
+        working_dir: str = None,
+    ) -> str:
+        """
+        Run a cell of Python code in an IPython environment.
+
+        Args:
+            code: The Python code to execute. Supports magic commands like %pip.
+        """
+        if sandbox_id is None:
+            raise ValueError("sandbox_id is required for execute_ipython_cell")
+
+        # Write code to temp file and execute with python
+        escaped_code = code.replace("'", "'\\''")
+        cmd = f"{ENV_VARS} python3 -c '{escaped_code}'"
+        exit_code, output = await self._execute_command(cmd, sandbox_id, turn_timeout, working_dir=working_dir)
+
+        if len(output) > 10000:
+            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
+
+        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
+
+    async def str_replace_editor(
+        self,
+        command: str,
+        path: str,
+        file_text: str | None = None,
+        old_str: str | None = None,
+        new_str: str | None = None,
+        insert_line: int | None = None,
+        view_range: list[int] | None = None,
+        sandbox_id: str | None = None,
+        turn_timeout: int = 90,
+        working_dir: str = None,
+    ) -> str:
+        """
+        Custom editing tool for viewing, creating and editing files.
+
+        Args:
+            command: The editing command to perform. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`.
+            path: Absolute path to file or directory, e.g. `/home/repo/file.py` or `/home/repo`.
+            file_text: Required parameter of `create` command, with the content of the file to be created.
+            old_str: Required parameter of `str_replace` command containing the string in `path` to replace.
+            new_str: Optional parameter of `str_replace` command containing the new string. Required parameter of `insert` command.
+            insert_line: Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.
+            view_range: Optional parameter of `view` command when `path` points to a file. If provided, the file will be shown in the indicated line number range, e.g. [11, 12] will show lines 11 and 12.
+        """
+        if sandbox_id is None:
+            raise ValueError("sandbox_id is required for str_replace_editor")
+
+        if command == "view":
+            if view_range:
+                start, end = view_range[0], view_range[1] if len(view_range) > 1 else -1
+                if end == -1:
+                    cmd = f"sed -n '{start},$p' {shlex.quote(path)} | nl -ba -v {start}"
+                else:
+                    cmd = f"sed -n '{start},{end}p' {shlex.quote(path)} | nl -ba -v {start}"
+            else:
+                # Check if path is directory or file
+                cmd = f"if [ -d {shlex.quote(path)} ]; then find {shlex.quote(path)} -maxdepth 2 -type f | head -100; else cat -n {shlex.quote(path)}; fi"
+
+        elif command == "create":
+            if file_text is None:
+                return "Error: file_text is required for create command"
+            escaped_text = file_text.replace("'", "'\\''")
+            cmd = f"cat > {shlex.quote(path)} << 'CREATEFILEEOF'\n{file_text}\nCREATEFILEEOF"
+
+        elif command == "str_replace":
+            if old_str is None:
+                return "Error: old_str is required for str_replace command"
+            new_str = new_str or ""
+
+            # Create a Python script for safe replacement
+            replace_script = f'''
+import sys
+path = {repr(path)}
+old_str = {repr(old_str)}
+new_str = {repr(new_str)}
+
+with open(path, 'r') as f:
+    content = f.read()
+
+count = content.count(old_str)
+if count == 0:
+    print(f"Error: old_str not found in {{path}}", file=sys.stderr)
+    sys.exit(1)
+elif count > 1:
+    print(f"Error: old_str found {{count}} times in {{path}}. Must be unique.", file=sys.stderr)
+    sys.exit(1)
+
+new_content = content.replace(old_str, new_str, 1)
+with open(path, 'w') as f:
+    f.write(new_content)
+
+print(f"Successfully replaced in {{path}}")
+'''
+            escaped_script = replace_script.replace("'", "'\\''")
+            cmd = f"python3 -c '{escaped_script}'"
+
+        elif command == "insert":
+            if insert_line is None or new_str is None:
+                return "Error: insert_line and new_str are required for insert command"
+            # Use sed to insert after line
+            escaped_new_str = new_str.replace("'", "'\\''").replace("\n", "\\n")
+            cmd = f"sed -i '{insert_line}a\\{escaped_new_str}' {shlex.quote(path)}"
+
+        elif command == "undo_edit":
+            # Try to restore from git
+            cmd = f"git checkout -- {shlex.quote(path)} 2>/dev/null || echo 'No backup available for undo'"
+
+        else:
+            return f"Error: Unknown command '{command}'. Use one of: view, create, str_replace, insert, undo_edit"
+
+        full_cmd = f"{ENV_VARS} {cmd}"
+        exit_code, output = await self._execute_command(full_cmd, sandbox_id, turn_timeout, working_dir=working_dir)
+
+        if len(output) > 10000:
+            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
+
+        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
+
+    async def file_read(
+        self,
+        path: str,
+        start: int = 0,
+        end: int = -1,
+        sandbox_id: str | None = None,
+        turn_timeout: int = 90,
+        working_dir: str = None,
+    ) -> str:
+        """
+        Read a file from a given path.
+
+        Args:
+            path: The path to the file to read.
+            start: The starting line number (0-indexed). Default is 0.
+            end: The ending line number (0-indexed, -1 for end of file). Default is -1.
+        """
+        if sandbox_id is None:
+            raise ValueError("sandbox_id is required for file_read")
+
+        if start == 0 and end == -1:
+            cmd = f"cat -n {shlex.quote(path)}"
+        elif end == -1:
+            cmd = f"tail -n +{start + 1} {shlex.quote(path)} | nl -ba -v {start + 1}"
+        else:
+            num_lines = end - start + 1
+            cmd = f"sed -n '{start + 1},{end + 1}p' {shlex.quote(path)} | nl -ba -v {start + 1}"
+
+        full_cmd = f"{ENV_VARS} {cmd}"
+        exit_code, output = await self._execute_command(full_cmd, sandbox_id, turn_timeout, working_dir=working_dir)
+
+        if len(output) > 10000:
+            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
+
+        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
+
+    async def submit(
+        self,
+        sandbox_id: str | None = None,
+        turn_timeout: int = 90,
+        working_dir: str = None,
+    ) -> str:
+        """
+        Submit your changes when you are done with the task.
+
+        Call this tool when you have completed all necessary changes and verified they work correctly.
+        """
+        if sandbox_id is None:
+            raise ValueError("sandbox_id is required for submit")
+
+        return "<<<SUBMIT_CHANGES>>>\nYour changes have been submitted for evaluation."
+
+    # ========================================================================
+    # Sandbox Setup
+    # ========================================================================
+
+    async def wait_for_creation_loop(self, sandbox_id: str) -> str:
+        """Wait for sandbox creation with retry logic."""
+        while True:
+            try:
+                await self.sandbox_client.wait_for_creation(sandbox_id, max_attempts=12000)
+                break
+            except SandboxNotRunningError:
+                await self.destroy_sandbox(sandbox_id)
+                sandbox = await self.sandbox_client.create(self.sandbox_request)
+                sandbox_id = sandbox.id
+        self.logger.debug(f"Sandbox {sandbox_id} is ready")
+        return sandbox_id
+
+    async def setup_repo(self, sandbox_id: str, state: State):
+        """Set up Multi-SWE repository in the sandbox."""
+        info = restore_row(state["info"])
+        instance_id = info["instance_id"]
+
+        # Install curl if needed
+        results = await self.sandbox_client.execute_command(
+            sandbox_id, "which curl || (apt-get update && apt-get install -y curl)", working_dir="/home"
+        )
+        self.logger.debug(f"CURL install results for {instance_id=}: {results.stdout} {results.stderr}")
+
+        # Install uv
+        results = await self.execute_command_raise_on_error(
+            sandbox_id, "curl -LsSf https://astral.sh/uv/install.sh | sh", working_dir="/home"
+        )
+        self.logger.debug(f"UV install results: {results.stdout} {results.stderr}")
+
+        # Delete pre-existing fix.patch
+        await self.execute_command_raise_on_error(sandbox_id, "rm -f /home/fix.patch", working_dir="/home")
+
+    async def setup_state(self, state: State, **kwargs: Any) -> State:
+        """Create per-rollout sandbox."""
+        docker_image = state["info"]["docker_image"]
+        self.logger.info(f"Setting up state for docker image: {docker_image}")
+        self.sandbox_request = self.sandbox_request.model_copy(
+            update={
+                "docker_image": f"mswebench/{docker_image}".lower(),
+                "labels": ["multi-swe-openhands"],
+            },
+            deep=True,
+        )
+        self.logger.debug(f"Sandbox request: {pprint.pformat(self.sandbox_request)}")
+        try:
+            sandbox = await self.sandbox_client.create(self.sandbox_request)
+            self.active_sandboxes.add(sandbox.id)
+            state["sandbox_id"] = sandbox.id
+            self.logger.debug(f"Creating sandbox {sandbox.id}...")
+            await self.wait_for_creation_loop(sandbox.id)
+            self.logger.debug(f"Setting up repository for sandbox {sandbox.id}...")
+            await self.setup_repo(sandbox.id, state)
+            self.logger.debug(f"Sandbox {sandbox.id} is ready.")
+        except Exception as e:
+            self.logger.error(f"Error:\n\n{repr(e)}")
+            self.logger.error(traceback.format_exc())
+            state["sandbox_id"] = None
+            state["sandbox_error"] = 1
+        return state
+
+    def update_tool_args(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        messages: vf.Messages,
+        state: vf.State,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Inject sandbox_id and working_dir into tool calls."""
+        tools_needing_sandbox = [
+            "execute_bash",
+            "execute_ipython_cell",
+            "str_replace_editor",
+            "file_read",
+            "submit",
+        ]
+        if tool_name in tools_needing_sandbox:
+            updated_args = dict(tool_args)
+            updated_args["sandbox_id"] = state["sandbox_id"]
+            updated_args["turn_timeout"] = self.turn_timeout
+
+            # Set working_dir based on Multi-SWE harness
+            info = restore_row(state["info"])
+            repo = info["repo"]
+            updated_args["working_dir"] = f"/home/{repo}"
+            return updated_args
+        else:
+            return tool_args
+
+    # ========================================================================
+    # Environment Response
+    # ========================================================================
+
+    async def env_response(self, messages: Messages, state: State, **kwargs) -> Messages:
+        """Process tool calls and return environment messages."""
+        assert isinstance(messages, list)
+        env_messages = []
+
+        if "tool_calls" in messages[-1]:
+            if len(messages[-1]["tool_calls"]) != 1:
+                env_messages.append(
+                    {
+                        "role": "user",
+                        "content": FORMAT_ERROR_TEMPLATE.format(num_actions=len(messages[-1]["tool_calls"])),
+                    }
+                )
+                return env_messages
+
+            for tool_call in messages[-1]["tool_calls"]:
+                if isinstance(tool_call, ChatCompletionMessageToolCall):
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments)
+                    tool_call_id = tool_call.id or ""
+                elif isinstance(tool_call, dict):
+                    func = tool_call.get("function", {})
+                    tool_name = func.get("name", "")
+                    tool_args_str = func.get("arguments", "{}")
+                    try:
+                        tool_args = json.loads(tool_args_str) if isinstance(tool_args_str, str) else tool_args_str
+                        tool_call_id = tool_call.get("id", "")
+                    except json.JSONDecodeError as e:
+                        self.logger.error(f"Error parsing tool arguments: {e}")
+                        tool_message = {
+                            "role": "tool",
+                            "content": f"Error: Failed to parse tool call arguments. Error: {e}",
+                            "tool_call_id": "invalid",
+                        }
+                        env_messages.append(tool_message)
+                        state["is_completed"] = True
+                        return env_messages
+                else:
+                    self.logger.warning(f"Unexpected tool_call type: {type(tool_call)}")
+                    continue
+
+                try:
+                    tool_args = self.update_tool_args(tool_name, tool_args, messages, state, **kwargs)
+                    tool_message: Message = await self.call_tool(tool_name, tool_args, tool_call_id)
+                except ValueError as e:
+                    tool_message = {
+                        "role": "tool",
+                        "content": f"Error: Failed to call tool '{tool_name}': {e}",
+                        "tool_call_id": tool_call_id,
+                    }
+                    self.logger.error(f"Error calling tool: {e}")
+                except Exception as e:
+                    tool_message = {
+                        "role": "tool",
+                        "content": f"Error executing tool '{tool_name}': {repr(e)}",
+                        "tool_call_id": tool_call_id,
+                    }
+                    self.logger.error(f"Error executing tool '{tool_name}': {repr(e)}")
+                    self.logger.error(traceback.format_exc())
+                env_messages.append(tool_message)
+
+        self.logger.debug(f"Env Response Messages:\n{pprint.pformat(env_messages)}")
+        return env_messages
+
+    # ========================================================================
+    # Test Execution
+    # ========================================================================
+
+    async def run_tests(self, state: State, test_timeout: int = 1800) -> str:
+        """Run tests for Multi-SWE harness."""
+        info = restore_row(state["info"])
+        instance_id = info["instance_id"]
+        repo = info["repo"]
+        sandbox_id = state["sandbox_id"]
+
+        # Upload and run create_fix_patch script
+        await self.sandbox_client.upload_file(
+            sandbox_id, "/home/create_fix_patch.sh", CREATE_FIX_PATCH_SCRIPT.encode()
+        )
+        results = await self.sandbox_client.execute_command(
+            sandbox_id,
+            f"{ENV_VARS} bash /home/create_fix_patch.sh",
+            timeout=min(test_timeout, 300),
+            working_dir=f"/home/{repo}",
+        )
+        self.logger.debug(f"create_fix_patch.sh results for {instance_id=}: {results.stdout} {results.stderr}")
+
+        # Run fix-run.sh to apply patch and run tests
+        try:
+            job = await self.sandbox_client.start_background_job(
+                sandbox_id,
+                f"{ENV_VARS} bash -o pipefail -c 'bash /home/fix-run.sh 2>&1 | tee /home/test_output.txt'",
+                working_dir=f"/home/{repo}",
+            )
+            for step in range(0, test_timeout, 2):
+                fix_run_results = await self.sandbox_client.get_background_job(sandbox_id, job)
+                if fix_run_results.completed:
+                    break
+                self.logger.debug(
+                    f"{instance_id=}: Polling for fix-run.sh completion... {step} seconds of {test_timeout=} seconds elapsed"
+                )
+                await asyncio.sleep(2)
+            if not fix_run_results.completed:
+                raise CommandTimeoutError(
+                    sandbox_id,
+                    command="bash /home/fix-run.sh",
+                    timeout=test_timeout,
+                )
+        except (CommandTimeoutError, APIError) as e:
+            self.logger.error(f"Command error: bash /home/fix-run.sh: {repr(e)}")
+            state["sandbox_error"] = 1
+            return ""
+
+        # Read test output
+        results = await self.execute_command_raise_on_error(sandbox_id, "cat /home/test_output.txt")
+        return results.stdout
+
+    async def post_rollout(self, state: State) -> None:
+        """Run tests after rollout completes."""
+        try:
+            state["test_output"] = await self.run_tests(state, test_timeout=self.test_timeout)
+            self.logger.debug(f"Test output:\n{state['test_output']}")
+            self.logger.debug(f"Total turns taken: {len(state['trajectory'])}")
+        except Exception as e:
+            state["instance_solved"] = False
+            state["error"] = repr(e)
+            state["test_output"] = ""
+            self.logger.debug(f"Error: {repr(e)}")
+            self.logger.debug(traceback.format_exc())
+
+    # ========================================================================
+    # Stop Conditions
+    # ========================================================================
+
+    @vf.stop(priority=1)
+    async def is_done(self, state: State) -> bool:
+        """Check if rollout should stop."""
+        if state.get("sandbox_error") == 1:
+            self.logger.error("Sandbox error. Aborting rollout.")
+            return True
+
+        completed = False
+        last_traj = state["trajectory"][-1] if state["trajectory"] else {}
+        last_completion = last_traj.get("completion", [])
+        for msg in reversed(last_completion):
+            if isinstance(msg, dict) and msg.get("role") == "tool":
+                if "<<<SUBMIT_CHANGES>>>" in msg.get("content", ""):
+                    completed = True
+                    state["instance_completed"] = completed
+                    break
+        return completed
+
+    # ========================================================================
+    # VLLM Processing
+    # ========================================================================
+
+    def process_env_results_vllm(
+        self, prompts: list[Messages], completions: list[Messages], states: list[State], *args, **kwargs
+    ) -> ProcessedOutputs:
+        """Process results for VLLM training."""
+
+        def deserialize_tool_calls(messages: list[dict]) -> list[dict]:
+            def deserialize_tool_call(tool_call: dict) -> dict:
+                return {
+                    **tool_call,
+                    "function": {
+                        **tool_call["function"],
+                        "arguments": json.loads(tool_call["function"]["arguments"]),
+                    },
+                }
+
+            return [
+                {
+                    **message,
+                    "tool_calls": [deserialize_tool_call(tc) for tc in message.get("tool_calls") or []],
+                }
+                for message in messages
+            ]
+
+        prompts = [deserialize_tool_calls(prompt) for prompt in prompts]
+        completions = [deserialize_tool_calls(completion) for completion in completions]
+
+        processed_outputs = vf.Environment.process_env_results_vllm(
+            self, prompts, completions, states, *args, **kwargs
+        )
+
+        for i, state in enumerate(states):
+            if state.get("sandbox_error") == 1:
+                processed_outputs.completion_mask[i] = [0] * len(processed_outputs.completion_ids[i])
+
+        return processed_outputs
+
+
+# ============================================================================
+# Rubric (Reward Functions)
+# ============================================================================
+
+
+class MultiSWERubric(vf.Rubric):
+    """
+    Rubric for Multi-SWE environment using the same reward function
+    as mini_swe_agent_plus.
+    """
+
+    def __init__(self, dataset: Dataset, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.dataset = dataset
+        self.add_reward_func(self.has_error, 0.0)
+        self.add_reward_func(self.solved, 1.0)
+
+    def _calculate_reward_multiswe(self, state: State, info: Info) -> int:
+        """
+        Calculate reward for Multi-SWE dataset.
+        Same implementation as mini_swe_agent_plus.
+        """
+        multiswe_example = restore_row(info)
+        multiswe_ds: MultiSWEDataset = MultiSWEDataset.from_dict(multiswe_example)
+        instance: Instance = create_instance(multiswe_ds)
+        run_result: Union[str, TestResult] = multiswe_ds.run_result
+        test_patch_result: Union[str, TestResult] = multiswe_ds.test_patch_result
+        fix_patch_result: Union[str, TestResult] = state["test_output"]
+
+        report = generate_report(instance, run_result, test_patch_result, fix_patch_result)
+        is_valid, error_message = validate_report_against_dataset(report, multiswe_ds)
+        self.logger.debug(f"Multi-SWE: validate_report_against_dataset: {is_valid=} {error_message=}")
+        return int(is_valid)
+
+    def solved(self, state: State, info: Info, **kwargs: Any) -> int:
+        """Reward function for solved instances."""
+        return self._calculate_reward_multiswe(state, info)
+
+    def has_error(self, state: State) -> int:
+        """
+        Whether an infra failure occurred in sandboxes.
+        If so, the entire group of rollouts will be masked out in training.
+        """
+        return int(state.get("sandbox_error", 0))
+
+
+# ============================================================================
+# Environment Loader
+# ============================================================================
+
+
+def load_environment(
+    dataset_name: Literal["ByteDance-Seed/Multi-SWE-RL"] = "ByteDance-Seed/Multi-SWE-RL",
+    max_turns: int = 200,
+    total_timeout_minutes: int = 120,
+    test_timeout: int = 1800,
+    **kwargs: Any,
+) -> vf.Environment:
+    """
+    Load the Multi-SWE environment with OpenHands agent harness.
+
+    Args:
+        dataset_name: The dataset to use. Default is ByteDance-Seed/Multi-SWE-RL.
+        max_turns: Maximum number of turns per episode.
+        total_timeout_minutes: Total timeout for the episode in minutes.
+        test_timeout: Timeout for running tests in seconds.
+        **kwargs: Additional arguments passed to the environment.
+
+    Returns:
+        A configured Multi-SWE environment.
+    """
+    split = "train"
+
+    def process_example(x):
+        """Process dataset example into environment format."""
+        row = restore_row(x)
+        resolved_issues = row["resolved_issues"]
+        assert len(resolved_issues) == 1
+        issue = resolved_issues[0]
+
+        if hints := row.get("hints"):
+            problem_statement = issue["title"] + "\n\n" + issue["body"] + "\n\n" + hints
+        else:
+            problem_statement = issue["title"] + "\n\n" + issue["body"]
+
+        docker_image = f"{x['org']}_m_{x['repo']}:pr-{x['number']}"
+        repo = x["repo"]
+
+        return {
+            "prompt": [
+                {
+                    "role": "user",
+                    "content": PROMPT_TEMPLATE.format(
+                        problem_statement=problem_statement,
+                        repo=repo,
+                    ),
+                }
+            ],
+            "info": {**x, "docker_image": docker_image},
+            "answer": "",
+        }
+
+    dataset = load_dataset(dataset_name, split=split)
+    dataset = dataset.map(process_example)
+    # Filter out C/C++ as in mini_swe_agent_plus
+    dataset = dataset.filter(lambda x: x["lang"] not in ["c", "cpp"])
+
+    parser = vf.Parser()
+
+    rubric = MultiSWERubric(dataset=dataset)
+
+    return MultiSWEOpenHandsEnv(
+        dataset=dataset,
+        system_prompt=SYSTEM_PROMPT,
+        parser=parser,
+        rubric=rubric,
+        max_turns=max_turns,
+        test_timeout=test_timeout,
+        total_timeout_minutes=total_timeout_minutes,
+    )
+
+
+if __name__ == "__main__":
+    load_environment()
