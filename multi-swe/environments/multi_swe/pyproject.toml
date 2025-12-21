@@ -9,7 +9,6 @@ dependencies = [
     "prime-sandboxes>=0.2.5",
     "multi-swe-bench",
     "tenacity",
-    "huggingface_hub",
     "datasets",
 ]
 
