@@ -507,8 +507,8 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
         turn_timeout: int = 90,
         test_timeout: int = 1800,
         total_timeout_minutes: int = 120,
-        cpu_cores: int = 8,
-        memory_gb: int = 8,
+        cpu_cores: int = 2,
+        memory_gb: int = 4,
         **kwargs: Any,
     ) -> None:
         super().__init__(
