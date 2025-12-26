@@ -485,7 +485,7 @@ class DockerSandbox:
 # ============================================================================
 
 
-class MultiSWEOpenHandsEnv(vf.MultiTurnEnv):
+class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
     """
     Multi-SWE RL Environment with OpenHands agent harness.
 
@@ -512,6 +512,7 @@ class MultiSWEOpenHandsEnv(vf.MultiTurnEnv):
         **kwargs: Any,
     ) -> None:
         super().__init__(
+            tools=[],  # We add tools manually via add_tool()
             eval_dataset=eval_dataset,
             rubric=rubric,
             system_prompt=system_prompt,
