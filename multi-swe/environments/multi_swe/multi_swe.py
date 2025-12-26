@@ -898,16 +898,23 @@ print(f"Successfully replaced in {{path}}")
         env_messages = []
 
         if "tool_calls" in messages[-1]:
-            if len(messages[-1]["tool_calls"]) != 1:
-                env_messages.append(
-                    {
-                        "role": "user",
-                        "content": FORMAT_ERROR_TEMPLATE.format(num_actions=len(messages[-1]["tool_calls"])),
-                    }
-                )
+            tool_calls = messages[-1]["tool_calls"]
+            
+            # OpenHands requires single tool call per turn
+            # But we MUST respond to ALL tool_call_ids to satisfy OpenAI API
+            if len(tool_calls) != 1:
+                error_msg = FORMAT_ERROR_TEMPLATE.format(num_actions=len(tool_calls))
+                # Respond to EACH tool_call_id with error (OpenAI requires this)
+                for tc in tool_calls:
+                    tc_id = tc.id if hasattr(tc, 'id') else tc.get("id", "unknown")
+                    env_messages.append({
+                        "role": "tool",
+                        "content": error_msg,
+                        "tool_call_id": tc_id,
+                    })
                 return env_messages
 
-            for tool_call in messages[-1]["tool_calls"]:
+            for tool_call in tool_calls:
                 if isinstance(tool_call, ChatCompletionMessageToolCall):
                     tool_name = tool_call.function.name
                     tool_args = json.loads(tool_call.function.arguments)
