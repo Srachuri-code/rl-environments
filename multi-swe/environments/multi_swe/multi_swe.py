@@ -223,10 +223,11 @@ SYSTEM_PROMPT = """You are OpenHands agent, a helpful AI assistant that can inte
 """
 
 # User prompt from evaluation/benchmarks/swe_bench/run_infer.py (Python version)
+# NOTE: Multi-SWE Docker images have repos at /home/{repo}, not /workspace/
 PROMPT_TEMPLATE = """<uploaded_files>
-/workspace/{workspace_dir_name}
+/home/{workspace_dir_name}
 </uploaded_files>
-I've uploaded a python code repository in the directory {workspace_dir_name}. Consider the following issue description:
+I've uploaded a python code repository in the directory /home/{workspace_dir_name}. Consider the following issue description:
 
 <issue_description>
 {problem_statement}
@@ -680,7 +681,7 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
 
         Args:
             command: The commands to run. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`.
-            path: Absolute path to file or directory, e.g. `/workspace/file.py` or `/workspace`.
+            path: Absolute path to file or directory, e.g. `/home/repo/file.py` or `/home/repo`.
             file_text: Required parameter of `create` command, with the content of the file to be created.
             old_str: Required parameter of `str_replace` command containing the string in `path` to replace.
             new_str: Optional parameter of `str_replace` command containing the new string (if not given, no string will be added). Required parameter of `insert` command containing the string to insert.
@@ -881,8 +882,8 @@ print(f"Successfully replaced in {{path}}")
             # Set working_dir based on Multi-SWE harness
             info = restore_row(state["info"])
             repo = info["repo"]
-            # OpenHands uses /workspace/{workspace_dir_name}
-            updated_args["working_dir"] = f"/workspace/{repo}"
+            # Multi-SWE Docker images have repos at /home/{repo}
+            updated_args["working_dir"] = f"/home/{repo}"
             return updated_args
         else:
             return tool_args
