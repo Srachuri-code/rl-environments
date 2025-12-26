@@ -1,12 +1,12 @@
 [project]
 name = "multi-swe"
-description = "Multi-SWE RL Environment with OpenHands agent harness"
-tags = ["multi-swe", "openhands", "train", "eval", "multilingual"]
-version = "0.1.0"
+description = "Multi-SWE RL Environment with OpenHands agent harness (Harbor sandbox)"
+tags = ["multi-swe", "openhands", "train", "eval", "multilingual", "harbor"]
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.1.8",
-    "prime-sandboxes>=0.2.5",
+    "harbor",
     "multi-swe-bench",
     "tenacity",
     "datasets",
