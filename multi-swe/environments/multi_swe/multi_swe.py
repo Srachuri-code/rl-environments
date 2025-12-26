@@ -5,7 +5,7 @@ This environment combines:
 - Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
 - Same reward functions as mini_swe_agent_plus
 - OpenHands agent harness (tools/actions) - EXACT implementation from MopenHands
-- Harbor sandbox infrastructure (Docker-based) instead of prime-sandboxes
+- Custom Docker sandbox infrastructure using subprocess (no external sandbox dependencies)
 """
 
 import asyncio
@@ -13,9 +13,11 @@ import json
 import os
 import pprint
 import shlex
+import subprocess
 import tempfile
 import traceback
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Union
 
@@ -28,12 +30,6 @@ from multi_swe_bench.harness.report import Report, generate_report
 from multi_swe_bench.harness.test_result import TestResult
 from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
 from verifiers.types import ChatCompletionMessageToolCall, Info, Message, Messages, ProcessedOutputs, State
-
-# Harbor imports
-from harbor.environments.docker.docker import DockerEnvironment
-from harbor.environments.base import ExecResult
-from harbor.models.task.config import EnvironmentConfig
-from harbor.models.trial.paths import TrialPaths
 
 
 # ============================================================================
@@ -130,16 +126,16 @@ def validate_report_against_dataset(report: Report, multiswe_ds: MultiSWEDataset
 
 
 # ============================================================================
-# Custom Exception Classes (replacing prime_sandboxes exceptions)
+# Custom Exception Classes
 # ============================================================================
 
 
-class HarborError(Exception):
-    """Base exception for Harbor-related errors."""
+class SandboxError(Exception):
+    """Base exception for sandbox-related errors."""
     pass
 
 
-class CommandTimeoutError(HarborError):
+class CommandTimeoutError(SandboxError):
     """Raised when a command times out."""
     def __init__(self, sandbox_id: str, command: str, timeout: int):
         self.sandbox_id = sandbox_id
@@ -148,9 +144,22 @@ class CommandTimeoutError(HarborError):
         super().__init__(f"Command '{command}' timed out after {timeout}s in sandbox {sandbox_id}")
 
 
-class SandboxError(HarborError):
-    """Raised when there's a sandbox infrastructure error."""
+class ContainerError(SandboxError):
+    """Raised when there's a container infrastructure error."""
     pass
+
+
+# ============================================================================
+# Execution Result
+# ============================================================================
+
+
+@dataclass
+class ExecResult:
+    """Result of executing a command in a sandbox."""
+    return_code: int
+    stdout: str
+    stderr: str
 
 
 # ============================================================================
@@ -277,11 +286,11 @@ _FINISH_DESCRIPTION = """Finish the interaction when the task is complete OR if 
 # ============================================================================
 
 
-def _is_harbor_error(exception: Exception) -> bool:
-    """Check if exception is a Harbor-related error that should be retried."""
+def _is_transient_error(exception: Exception) -> bool:
+    """Check if exception is a transient error that should be retried."""
     error_str = str(exception).lower()
     # Retry on common transient errors
-    return any(err in error_str for err in ["503", "timeout", "connection", "unavailable"])
+    return any(err in error_str for err in ["timeout", "connection", "unavailable", "refused"])
 
 
 # Environment variables for sandbox
@@ -290,79 +299,114 @@ ENV_VARS = f"{PATH};PAGER=cat;MANPAGER=cat;LESS=-R;PIP_PROGRESS_BAR=off;TQDM_DIS
 
 
 # ============================================================================
-# Harbor Sandbox Wrapper
+# Docker Sandbox (Custom Implementation using subprocess)
 # ============================================================================
 
 
-class HarborSandbox:
+class DockerSandbox:
     """
-    Wrapper around Harbor's DockerEnvironment to provide a sandbox interface
-    compatible with the Multi-SWE environment requirements.
+    Custom Docker sandbox using subprocess to manage containers.
+    No external dependencies - uses docker CLI directly.
     """
 
     def __init__(
         self,
         docker_image: str,
-        session_id: str,
-        environment_dir: Path,
-        trial_paths: TrialPaths,
+        container_name: str,
         cpu_cores: int = 8,
         memory_mb: int = 8192,
         logger=None,
     ):
         """
-        Initialize a Harbor sandbox.
+        Initialize a Docker sandbox.
 
         Args:
             docker_image: The Docker image to use (e.g., "mswebench/org_m_repo:pr-123")
-            session_id: Unique session identifier
-            environment_dir: Directory containing environment files
-            trial_paths: Paths for trial logs
+            container_name: Unique container name/ID
             cpu_cores: Number of CPU cores
             memory_mb: Memory in MB
             logger: Logger instance
         """
         self.docker_image = docker_image
-        self.session_id = session_id
-        self.environment_dir = environment_dir
-        self.trial_paths = trial_paths
+        self.container_name = container_name
+        self.cpu_cores = cpu_cores
+        self.memory_mb = memory_mb
         self.logger = logger
-
-        # Create environment config
-        self.env_config = EnvironmentConfig(
-            docker_image=docker_image,
-            cpus=cpu_cores,
-            memory_mb=memory_mb,
-            storage_mb=10240,  # 10GB
-            gpus=0,
-        )
-
-        self._docker_env: DockerEnvironment | None = None
         self._started = False
+
+    async def _run_docker_cmd(
+        self,
+        args: list[str],
+        timeout: int | None = None,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess:
+        """Run a docker command asynchronously."""
+        cmd = ["docker"] + args
+        
+        def _run():
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run)
+        
+        if check and result.returncode != 0:
+            raise ContainerError(
+                f"Docker command failed: {' '.join(cmd)}\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+        return result
 
     async def start(self) -> None:
         """Start the sandbox container."""
         if self._started:
             return
 
-        # Create the Docker environment
-        self._docker_env = DockerEnvironment(
-            environment_dir=self.environment_dir,
-            environment_name=self.session_id,
-            session_id=self.session_id,
-            trial_paths=self.trial_paths,
-            task_env_config=self.env_config,
-            logger=self.logger,
+        # Check if container already exists
+        result = await self._run_docker_cmd(
+            ["ps", "-a", "-q", "-f", f"name=^{self.container_name}$"],
+            check=False,
         )
+        
+        if result.stdout.strip():
+            # Container exists, remove it first
+            await self._run_docker_cmd(["rm", "-f", self.container_name], check=False)
 
-        # Start the container (uses prebuilt image)
-        await self._docker_env.start(force_build=False)
+        # Start new container
+        run_args = [
+            "run",
+            "-d",  # Detached mode
+            "--name", self.container_name,
+            "--cpus", str(self.cpu_cores),
+            "--memory", f"{self.memory_mb}m",
+            "--network", "none",  # Isolated network
+            self.docker_image,
+            "tail", "-f", "/dev/null",  # Keep container running
+        ]
+        
+        await self._run_docker_cmd(run_args, timeout=120)
         self._started = True
+
+        if self.logger:
+            self.logger.debug(f"Started container {self.container_name}")
 
     async def stop(self, delete: bool = True) -> None:
         """Stop the sandbox container."""
-        if self._docker_env and self._started:
-            await self._docker_env.stop(delete=delete)
+        if not self._started:
+            return
+
+        try:
+            await self._run_docker_cmd(["stop", "-t", "5", self.container_name], check=False, timeout=30)
+            if delete:
+                await self._run_docker_cmd(["rm", "-f", self.container_name], check=False, timeout=30)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Error stopping container {self.container_name}: {e}")
+        finally:
             self._started = False
 
     async def exec(
@@ -373,26 +417,49 @@ class HarborSandbox:
         timeout_sec: int | None = None,
     ) -> ExecResult:
         """Execute a command in the sandbox."""
-        if not self._started or not self._docker_env:
+        if not self._started:
             raise SandboxError("Sandbox not started")
 
-        return await self._docker_env.exec(
-            command=command,
-            cwd=cwd,
-            env=env,
-            timeout_sec=timeout_sec,
-        )
+        exec_args = ["exec"]
+        
+        # Add working directory
+        if cwd:
+            exec_args.extend(["-w", cwd])
+        
+        # Add environment variables
+        if env:
+            for key, value in env.items():
+                exec_args.extend(["-e", f"{key}={value}"])
+        
+        exec_args.append(self.container_name)
+        exec_args.extend(["bash", "-c", command])
+
+        try:
+            result = await self._run_docker_cmd(
+                exec_args,
+                timeout=timeout_sec,
+                check=False,  # Don't raise on non-zero exit
+            )
+            return ExecResult(
+                return_code=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+        except subprocess.TimeoutExpired:
+            raise asyncio.TimeoutError(f"Command timed out after {timeout_sec}s")
 
     async def upload_file(self, source_path: Path | str, target_path: str) -> None:
-        """Upload a file to the sandbox."""
-        if not self._started or not self._docker_env:
+        """Upload a file to the sandbox using docker cp."""
+        if not self._started:
             raise SandboxError("Sandbox not started")
 
-        await self._docker_env.upload_file(source_path, target_path)
+        await self._run_docker_cmd(
+            ["cp", str(source_path), f"{self.container_name}:{target_path}"],
+            timeout=60,
+        )
 
     async def upload_content(self, content: bytes, target_path: str) -> None:
         """Upload content to a file in the sandbox."""
-        # Create a temporary file with the content
         with tempfile.NamedTemporaryFile(delete=False, mode='wb') as f:
             f.write(content)
             temp_path = f.name
@@ -403,11 +470,14 @@ class HarborSandbox:
             os.unlink(temp_path)
 
     async def download_file(self, source_path: str, target_path: Path | str) -> None:
-        """Download a file from the sandbox."""
-        if not self._started or not self._docker_env:
+        """Download a file from the sandbox using docker cp."""
+        if not self._started:
             raise SandboxError("Sandbox not started")
 
-        await self._docker_env.download_file(source_path, target_path)
+        await self._run_docker_cmd(
+            ["cp", f"{self.container_name}:{source_path}", str(target_path)],
+            timeout=60,
+        )
 
 
 # ============================================================================
@@ -419,13 +489,13 @@ class MultiSWEOpenHandsEnv(vf.Environment):
     """
     Multi-SWE RL Environment with OpenHands agent harness.
 
-    Uses Harbor for sandbox management instead of prime-sandboxes.
+    Uses custom Docker sandbox (subprocess-based, no external dependencies).
 
     Combines:
     - Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
     - Reward functions from mini_swe_agent_plus
     - OpenHands-style tools: execute_bash, str_replace_editor, finish
-    - Harbor Docker sandbox infrastructure
+    - Custom Docker sandbox infrastructure
     """
 
     def __init__(
@@ -440,7 +510,6 @@ class MultiSWEOpenHandsEnv(vf.Environment):
         total_timeout_minutes: int = 120,
         cpu_cores: int = 8,
         memory_gb: int = 8,
-        work_dir: Path | str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -458,15 +527,8 @@ class MultiSWEOpenHandsEnv(vf.Environment):
         self.cpu_cores = cpu_cores
         self.memory_mb = memory_gb * 1024
 
-        # Work directory for Harbor environments
-        if work_dir is None:
-            self.work_dir = Path(tempfile.mkdtemp(prefix="multi_swe_harbor_"))
-        else:
-            self.work_dir = Path(work_dir)
-            self.work_dir.mkdir(parents=True, exist_ok=True)
-
         # Track active sandboxes for cleanup
-        self.active_sandboxes: dict[str, HarborSandbox] = {}
+        self.active_sandboxes: dict[str, DockerSandbox] = {}
 
         # Add OpenHands-style tools
         # Per MopenHands SWE-bench config: codeact_enable_jupyter=False, codeact_enable_llm_editor=False
@@ -508,9 +570,9 @@ class MultiSWEOpenHandsEnv(vf.Environment):
                 f"The command timed out after {timeout}s and has been killed. Please try a different command.",
             )
         except Exception as e:
-            if _is_harbor_error(e):
-                self.logger.warning(f"Harbor error, will retry: {repr(e)}")
-                raise RuntimeError(f"Harbor error: {repr(e)}")
+            if _is_transient_error(e):
+                self.logger.warning(f"Transient error, will retry: {repr(e)}")
+                raise RuntimeError(f"Transient error: {repr(e)}")
             self.logger.error(f"Execution error: {repr(e)}")
             self.logger.error(traceback.format_exc())
             return (1, "Command failed due to infrastructure error. Try the same command again!")
@@ -719,44 +781,8 @@ print(f"Successfully replaced in {{path}}")
         return "OBSERVATION:\n<<<FINISH>>>\nYour task has been completed. The changes will now be evaluated."
 
     # ========================================================================
-    # Sandbox Setup (using Harbor)
+    # Sandbox Setup (using custom Docker sandbox)
     # ========================================================================
-
-    def _create_environment_dir(self, docker_image: str, session_id: str) -> Path:
-        """Create a directory with Harbor environment files."""
-        env_dir = self.work_dir / session_id
-        env_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create docker-compose.yaml for prebuilt image
-        compose_content = f"""
-version: '3.8'
-services:
-  main:
-    image: {docker_image}
-    container_name: {session_id}
-    command: tail -f /dev/null
-    stdin_open: true
-    tty: true
-    deploy:
-      resources:
-        limits:
-          cpus: '{self.cpu_cores}'
-          memory: {self.memory_mb}M
-"""
-        (env_dir / "docker-compose.yaml").write_text(compose_content)
-
-        return env_dir
-
-    def _create_trial_paths(self, session_id: str) -> TrialPaths:
-        """Create trial paths for Harbor environment."""
-        trial_dir = self.work_dir / "trials" / session_id
-        trial_dir.mkdir(parents=True, exist_ok=True)
-
-        return TrialPaths(
-            base_dir=trial_dir,
-            verifier_dir=trial_dir / "verifier",
-            agent_dir=trial_dir / "agent",
-        )
 
     async def setup_repo(self, sandbox_id: str, state: State):
         """Set up Multi-SWE repository in the sandbox."""
@@ -787,44 +813,38 @@ services:
         )
 
     async def setup_state(self, state: State, **kwargs: Any) -> State:
-        """Create per-rollout sandbox using Harbor."""
+        """Create per-rollout sandbox using Docker."""
         docker_image = state["info"]["docker_image"]
-        self.logger.info(f"Setting up Harbor sandbox for docker image: {docker_image}")
+        self.logger.info(f"Setting up Docker sandbox for image: {docker_image}")
 
-        # Create unique session ID
-        session_id = f"multi-swe-{uuid.uuid4().hex[:12]}"
+        # Create unique container name
+        container_name = f"multi-swe-{uuid.uuid4().hex[:12]}"
         full_image = f"mswebench/{docker_image}".lower()
 
         try:
-            # Create environment directory with docker-compose
-            env_dir = self._create_environment_dir(full_image, session_id)
-            trial_paths = self._create_trial_paths(session_id)
-
-            # Create and start Harbor sandbox
-            sandbox = HarborSandbox(
+            # Create and start Docker sandbox
+            sandbox = DockerSandbox(
                 docker_image=full_image,
-                session_id=session_id,
-                environment_dir=env_dir,
-                trial_paths=trial_paths,
+                container_name=container_name,
                 cpu_cores=self.cpu_cores,
                 memory_mb=self.memory_mb,
                 logger=self.logger,
             )
 
-            self.logger.debug(f"Starting Harbor sandbox {session_id}...")
+            self.logger.debug(f"Starting Docker sandbox {container_name}...")
             await sandbox.start()
 
             # Store sandbox reference
-            self.active_sandboxes[session_id] = sandbox
-            state["sandbox_id"] = session_id
+            self.active_sandboxes[container_name] = sandbox
+            state["sandbox_id"] = container_name
 
             # Setup repository
-            self.logger.debug(f"Setting up repository for sandbox {session_id}...")
-            await self.setup_repo(session_id, state)
-            self.logger.debug(f"Harbor sandbox {session_id} is ready.")
+            self.logger.debug(f"Setting up repository for sandbox {container_name}...")
+            await self.setup_repo(container_name, state)
+            self.logger.debug(f"Docker sandbox {container_name} is ready.")
 
         except Exception as e:
-            self.logger.error(f"Error creating Harbor sandbox:\n\n{repr(e)}")
+            self.logger.error(f"Error creating Docker sandbox:\n\n{repr(e)}")
             self.logger.error(traceback.format_exc())
             state["sandbox_id"] = None
             state["sandbox_error"] = 1
@@ -1129,7 +1149,7 @@ def load_environment(
     """
     Load the Multi-SWE environment with OpenHands agent harness.
 
-    Uses Harbor for sandbox infrastructure.
+    Uses custom Docker sandbox (subprocess-based, no external dependencies).
 
     Args:
         dataset_name: The dataset to use. Default is PrimeIntellect/Multi-SWE-RL.
