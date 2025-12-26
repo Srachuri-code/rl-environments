@@ -2,9 +2,9 @@
 Multi-SWE RL Environment
 
 This environment combines:
-- Multi-SWE dataset from ByteDance-Seed/Multi-SWE-RL (verifiers implementation)
+- Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
 - Same reward functions as mini_swe_agent_plus
-- OpenHands agent harness (tools/actions)
+- OpenHands agent harness (tools/actions) - EXACT implementation from MopenHands
 """
 
 import asyncio
@@ -166,54 +166,76 @@ echo "Unstaged changes have been restored." >&2
 '''
 
 # ============================================================================
-# Prompts (OpenHands-style)
+# OpenHands Prompts - EXACT from MopenHands
+# Source: https://github.com/multi-swe-bench/MopenHands
 # ============================================================================
 
+# System prompt from openhands/agenthub/codeact_agent/prompts/system_prompt.j2
 SYSTEM_PROMPT = """You are OpenHands agent, a helpful AI assistant that can interact with a computer to solve tasks.
 <IMPORTANT>
 * If user provides a path, you should NOT assume it's relative to the current working directory. Instead, you should explore the file system to find the file before working on it.
+* When configuring git credentials, use "openhands" as the user.name and "openhands@all-hands.dev" as the user.email by default, unless explicitly instructed otherwise.
 * The assistant MUST NOT include comments in the code unless they are necessary to describe non-obvious behavior.
 </IMPORTANT>
 """
 
+# User prompt from evaluation/benchmarks/swe_bench/run_infer.py (Python version)
 PROMPT_TEMPLATE = """<uploaded_files>
-/home/{repo}
+/workspace/{workspace_dir_name}
 </uploaded_files>
-
-I've uploaded a code repository in the directory {repo}. Consider the following issue description:
+I've uploaded a python code repository in the directory {workspace_dir_name}. Consider the following issue description:
 
 <issue_description>
 {problem_statement}
 </issue_description>
 
 Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
-
 I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
-
-Also the development environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
-
-Your task is to make the minimal changes to non-test files in the /home/{repo} directory to ensure the <issue_description> is satisfied.
-
+Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+Your task is to make the minimal changes to non-test files in the /workspace directory to ensure the <issue_description> is satisfied.
 Follow these steps to resolve the issue:
 1. As a first step, it might be a good idea to explore the repo to familiarize yourself with its structure.
-2. Create a script to reproduce the error and execute it with the appropriate command using the bash tool, to confirm the error.
+2. Create a script to reproduce the error and execute it with `python <filename.py>` using the BashTool, to confirm the error.
 3. Edit the sourcecode of the repo to resolve the issue.
 4. Rerun your reproduce script and confirm that the error is fixed!
 5. Think about edgecases, add comprehensive tests for them in your reproduce script, and run them to make sure your fix handles them as well.
-
-When you are done, use the submit tool to submit your changes.
-
+6. Once you are done with the initial implementation, please carefully re-read the problem description and check the difference between the current code and the base commit {base_commit}. Do you think that the issue has been completely and comprehensively solved? Write tests to check the correctness of the solution, specifically focusing on tests that may point out any remaining problems that are not yet solved. Run all of the tests in the repo and check if any of them fail, and if they do fix the code. Repeat this process of carefully reading the problem description and current implementation, testing, and fixing any problems until you are confident that the current implementation is correct. Find and run any tests in the repo that are related to:
+   - The issue you are fixing
+   - The files you modified
+   - The functions you changed
+   Make sure all these tests pass with your changes.
 Your thinking should be thorough and so it's fine if it's very long.
 """
 
-ACTION_OBSERVATION_TEMPLATE = """<returncode>{exit_code}</returncode>
-<output>
-{output}
-</output>"""
+# Format error template
+FORMAT_ERROR_TEMPLATE = """Please provide EXACTLY ONE tool call, found {num_actions} tool calls."""
 
-FORMAT_ERROR_TEMPLATE = """Please provide EXACTLY ONE tool call, found {num_actions} tool calls.
 
-If you have completed your assignment, please use the submit tool to submit your solution."""
+# ============================================================================
+# OpenHands Tool Descriptions - EXACT from MopenHands function_calling.py
+# Source: https://github.com/multi-swe-bench/MopenHands/blob/main/openhands/agenthub/codeact_agent/function_calling.py
+# ============================================================================
+
+_BASH_DESCRIPTION = """Execute a bash command in the terminal.
+* Long running commands: For commands that may run indefinitely, it should be run in the background and the output should be redirected to a file, e.g. command = `python3 app.py > server.log 2>&1 &`.
+* Interact with running process: If a bash command returns exit code `-1`, this means the process is not yet finished. By setting `is_input` to `true`, the assistant can interact with the running process and send empty `command` to retrieve any additional logs, or send additional text (set `command` to the text) to STDIN of the running process, or send command like `C-c` (Ctrl+C), `C-d` (Ctrl+D), `C-z` (Ctrl+Z) to interrupt the process.
+* One command at a time: You can only execute one bash command at a time. If you need to run multiple commands sequentially, you can use `&&` or `;` to chain them together.
+"""
+
+_STR_REPLACE_EDITOR_DESCRIPTION = """Custom editing tool for viewing, creating and editing files in plain-text format
+* State is persistent across command calls and discussions with the user
+* If `path` is a file, `view` displays the result of applying `cat -n`. If `path` is a directory, `view` lists non-hidden files and directories up to 2 levels deep
+* The `create` command cannot be used if the specified `path` already exists as a file
+* If a `command` generates a long output, it will be truncated and marked with `<response clipped>`
+* The `undo_edit` command will revert the last edit made to the file at `path`
+
+Notes for using the `str_replace` command:
+* The `old_str` parameter should match EXACTLY one or more consecutive lines from the original file. Be mindful of whitespaces!
+* If the `old_str` parameter is not unique in the file, the replacement will not be performed. Make sure to include enough context in `old_str` to make it unique
+* The `new_str` parameter should contain the edited lines that should replace the `old_str`
+"""
+
+_FINISH_DESCRIPTION = """Finish the interaction when the task is complete OR if the assistant cannot proceed further with the task."""
 
 
 # ============================================================================
@@ -244,9 +266,9 @@ class MultiSWEOpenHandsEnv(vf.SandboxEnv):
     Multi-SWE RL Environment with OpenHands agent harness.
 
     Combines:
-    - Multi-SWE dataset from ByteDance-Seed/Multi-SWE-RL
+    - Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
     - Reward functions from mini_swe_agent_plus
-    - OpenHands-style tools (execute_bash, execute_ipython_cell, str_replace_editor, file_read)
+    - OpenHands-style tools: execute_bash, str_replace_editor, finish
     """
 
     def __init__(
@@ -280,12 +302,12 @@ class MultiSWEOpenHandsEnv(vf.SandboxEnv):
         self.test_timeout = test_timeout
 
         # Remove default bash tool and add OpenHands-style tools
+        # Per MopenHands SWE-bench config: codeact_enable_jupyter=False, codeact_enable_llm_editor=False
+        # This means: execute_bash + str_replace_editor + finish (NO execute_ipython_cell)
         self.remove_tool(self.bash)
         self.add_tool(self.execute_bash, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
-        self.add_tool(self.execute_ipython_cell, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
         self.add_tool(self.str_replace_editor, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
-        self.add_tool(self.file_read, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
-        self.add_tool(self.submit, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
+        self.add_tool(self.finish, args_to_skip=["sandbox_id", "turn_timeout", "working_dir"])
 
     # ========================================================================
     # Command execution helpers
@@ -344,8 +366,16 @@ class MultiSWEOpenHandsEnv(vf.SandboxEnv):
             )
         return results
 
+    def _format_observation(self, exit_code: int, output: str) -> str:
+        """Format tool output in OpenHands observation format."""
+        # Truncate long outputs (OpenHands behavior)
+        if len(output) > 10000:
+            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
+
+        return f"OBSERVATION:\n{output}\n[Command finished with exit code {exit_code}]"
+
     # ========================================================================
-    # OpenHands-style Tools
+    # OpenHands-style Tools - EXACT from MopenHands
     # ========================================================================
 
     async def execute_bash(
@@ -358,10 +388,13 @@ class MultiSWEOpenHandsEnv(vf.SandboxEnv):
     ) -> str:
         """
         Execute a bash command in the terminal.
+        * Long running commands: For commands that may run indefinitely, it should be run in the background and the output should be redirected to a file, e.g. command = `python3 app.py > server.log 2>&1 &`.
+        * Interact with running process: If a bash command returns exit code `-1`, this means the process is not yet finished. By setting `is_input` to `true`, the assistant can interact with the running process and send empty `command` to retrieve any additional logs, or send additional text (set `command` to the text) to STDIN of the running process, or send command like `C-c` (Ctrl+C), `C-d` (Ctrl+D), `C-z` (Ctrl+Z) to interrupt the process.
+        * One command at a time: You can only execute one bash command at a time. If you need to run multiple commands sequentially, you can use `&&` or `;` to chain them together.
 
         Args:
-            command: The bash command to execute. Can be empty string to view additional logs when previous exit code is `-1`. Can be `C-c` (Ctrl+C) to interrupt the currently running process.
-            is_input: If 'true', the command is an input to the running process. If 'false', the command is a bash command to be executed in the terminal. Default is 'false'.
+            command: The bash command to execute. Can be empty string to view additional logs when previous exit code is `-1`. Can be `C-c` (Ctrl+C) to interrupt the currently running process. Note: You can only execute one bash command at a time. If you need to run multiple commands sequentially, you can use `&&` or `;` to chain them together.
+            is_input: If True, the command is an input to the running process. If False, the command is a bash command to be executed in the terminal. Default is False.
         """
         if sandbox_id is None:
             raise ValueError("sandbox_id is required for execute_bash")
@@ -376,37 +409,7 @@ class MultiSWEOpenHandsEnv(vf.SandboxEnv):
         full_cmd = f"{ENV_VARS} {cmd}"
         exit_code, output = await self._execute_command(full_cmd, sandbox_id, turn_timeout, working_dir=working_dir)
 
-        # Truncate long outputs
-        if len(output) > 10000:
-            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
-
-        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
-
-    async def execute_ipython_cell(
-        self,
-        code: str,
-        sandbox_id: str | None = None,
-        turn_timeout: int = 90,
-        working_dir: str = None,
-    ) -> str:
-        """
-        Run a cell of Python code in an IPython environment.
-
-        Args:
-            code: The Python code to execute. Supports magic commands like %pip.
-        """
-        if sandbox_id is None:
-            raise ValueError("sandbox_id is required for execute_ipython_cell")
-
-        # Write code to temp file and execute with python
-        escaped_code = code.replace("'", "'\\''")
-        cmd = f"{ENV_VARS} python3 -c '{escaped_code}'"
-        exit_code, output = await self._execute_command(cmd, sandbox_id, turn_timeout, working_dir=working_dir)
-
-        if len(output) > 10000:
-            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
-
-        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
+        return self._format_observation(exit_code, output)
 
     async def str_replace_editor(
         self,
@@ -422,16 +425,26 @@ class MultiSWEOpenHandsEnv(vf.SandboxEnv):
         working_dir: str = None,
     ) -> str:
         """
-        Custom editing tool for viewing, creating and editing files.
+        Custom editing tool for viewing, creating and editing files in plain-text format
+        * State is persistent across command calls and discussions with the user
+        * If `path` is a file, `view` displays the result of applying `cat -n`. If `path` is a directory, `view` lists non-hidden files and directories up to 2 levels deep
+        * The `create` command cannot be used if the specified `path` already exists as a file
+        * If a `command` generates a long output, it will be truncated and marked with `<response clipped>`
+        * The `undo_edit` command will revert the last edit made to the file at `path`
+
+        Notes for using the `str_replace` command:
+        * The `old_str` parameter should match EXACTLY one or more consecutive lines from the original file. Be mindful of whitespaces!
+        * If the `old_str` parameter is not unique in the file, the replacement will not be performed. Make sure to include enough context in `old_str` to make it unique
+        * The `new_str` parameter should contain the edited lines that should replace the `old_str`
 
         Args:
-            command: The editing command to perform. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`.
-            path: Absolute path to file or directory, e.g. `/home/repo/file.py` or `/home/repo`.
+            command: The commands to run. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`.
+            path: Absolute path to file or directory, e.g. `/workspace/file.py` or `/workspace`.
             file_text: Required parameter of `create` command, with the content of the file to be created.
             old_str: Required parameter of `str_replace` command containing the string in `path` to replace.
-            new_str: Optional parameter of `str_replace` command containing the new string. Required parameter of `insert` command.
+            new_str: Optional parameter of `str_replace` command containing the new string (if not given, no string will be added). Required parameter of `insert` command containing the string to insert.
             insert_line: Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.
-            view_range: Optional parameter of `view` command when `path` points to a file. If provided, the file will be shown in the indicated line number range, e.g. [11, 12] will show lines 11 and 12.
+            view_range: Optional parameter of `view` command when `path` points to a file. If none is given, the full file is shown. If provided, the file will be shown in the indicated line number range, e.g. [11, 12] will show lines 11 and 12. Indexing at 1 to start. Setting `[start_line, -1]` shows all lines from `start_line` to the end of the file.
         """
         if sandbox_id is None:
             raise ValueError("sandbox_id is required for str_replace_editor")
@@ -450,7 +463,14 @@ class MultiSWEOpenHandsEnv(vf.SandboxEnv):
         elif command == "create":
             if file_text is None:
                 return "Error: file_text is required for create command"
-            escaped_text = file_text.replace("'", "'\\''")
+            # Check if file already exists
+            check_cmd = f"test -f {shlex.quote(path)} && echo 'EXISTS' || echo 'NOT_EXISTS'"
+            exit_code, check_output = await self._execute_command(
+                f"{ENV_VARS} {check_cmd}", sandbox_id, turn_timeout, working_dir=working_dir
+            )
+            if "EXISTS" in check_output:
+                return f"Error: File already exists at {path}. Cannot overwrite files with `create` command. Use `str_replace` instead."
+
             cmd = f"cat > {shlex.quote(path)} << 'CREATEFILEEOF'\n{file_text}\nCREATEFILEEOF"
 
         elif command == "str_replace":
@@ -502,62 +522,21 @@ print(f"Successfully replaced in {{path}}")
         full_cmd = f"{ENV_VARS} {cmd}"
         exit_code, output = await self._execute_command(full_cmd, sandbox_id, turn_timeout, working_dir=working_dir)
 
-        if len(output) > 10000:
-            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
+        return self._format_observation(exit_code, output)
 
-        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
-
-    async def file_read(
-        self,
-        path: str,
-        start: int = 0,
-        end: int = -1,
-        sandbox_id: str | None = None,
-        turn_timeout: int = 90,
-        working_dir: str = None,
-    ) -> str:
-        """
-        Read a file from a given path.
-
-        Args:
-            path: The path to the file to read.
-            start: The starting line number (0-indexed). Default is 0.
-            end: The ending line number (0-indexed, -1 for end of file). Default is -1.
-        """
-        if sandbox_id is None:
-            raise ValueError("sandbox_id is required for file_read")
-
-        if start == 0 and end == -1:
-            cmd = f"cat -n {shlex.quote(path)}"
-        elif end == -1:
-            cmd = f"tail -n +{start + 1} {shlex.quote(path)} | nl -ba -v {start + 1}"
-        else:
-            num_lines = end - start + 1
-            cmd = f"sed -n '{start + 1},{end + 1}p' {shlex.quote(path)} | nl -ba -v {start + 1}"
-
-        full_cmd = f"{ENV_VARS} {cmd}"
-        exit_code, output = await self._execute_command(full_cmd, sandbox_id, turn_timeout, working_dir=working_dir)
-
-        if len(output) > 10000:
-            output = output[:5000] + f"\n\n... (truncated {len(output) - 10000} characters) ...\n\n" + output[-5000:]
-
-        return ACTION_OBSERVATION_TEMPLATE.format(exit_code=exit_code, output=output)
-
-    async def submit(
+    async def finish(
         self,
         sandbox_id: str | None = None,
         turn_timeout: int = 90,
         working_dir: str = None,
     ) -> str:
         """
-        Submit your changes when you are done with the task.
-
-        Call this tool when you have completed all necessary changes and verified they work correctly.
+        Finish the interaction when the task is complete OR if the assistant cannot proceed further with the task.
         """
         if sandbox_id is None:
-            raise ValueError("sandbox_id is required for submit")
+            raise ValueError("sandbox_id is required for finish")
 
-        return "<<<SUBMIT_CHANGES>>>\nYour changes have been submitted for evaluation."
+        return "OBSERVATION:\n<<<FINISH>>>\nYour task has been completed. The changes will now be evaluated."
 
     # ========================================================================
     # Sandbox Setup
@@ -635,10 +614,8 @@ print(f"Successfully replaced in {{path}}")
         """Inject sandbox_id and working_dir into tool calls."""
         tools_needing_sandbox = [
             "execute_bash",
-            "execute_ipython_cell",
             "str_replace_editor",
-            "file_read",
-            "submit",
+            "finish",
         ]
         if tool_name in tools_needing_sandbox:
             updated_args = dict(tool_args)
@@ -648,7 +625,8 @@ print(f"Successfully replaced in {{path}}")
             # Set working_dir based on Multi-SWE harness
             info = restore_row(state["info"])
             repo = info["repo"]
-            updated_args["working_dir"] = f"/home/{repo}"
+            # OpenHands uses /workspace/{workspace_dir_name}
+            updated_args["working_dir"] = f"/workspace/{repo}"
             return updated_args
         else:
             return tool_args
@@ -803,7 +781,7 @@ print(f"Successfully replaced in {{path}}")
         last_completion = last_traj.get("completion", [])
         for msg in reversed(last_completion):
             if isinstance(msg, dict) and msg.get("role") == "tool":
-                if "<<<SUBMIT_CHANGES>>>" in msg.get("content", ""):
+                if "<<<FINISH>>>" in msg.get("content", ""):
                     completed = True
                     state["instance_completed"] = completed
                     break
@@ -902,7 +880,7 @@ class MultiSWERubric(vf.Rubric):
 
 
 def load_environment(
-    dataset_name: Literal["ByteDance-Seed/Multi-SWE-RL"] = "ByteDance-Seed/Multi-SWE-RL",
+    dataset_name: Literal["PrimeIntellect/Multi-SWE-RL"] = "PrimeIntellect/Multi-SWE-RL",
     max_turns: int = 200,
     total_timeout_minutes: int = 120,
     test_timeout: int = 1800,
@@ -912,7 +890,7 @@ def load_environment(
     Load the Multi-SWE environment with OpenHands agent harness.
 
     Args:
-        dataset_name: The dataset to use. Default is ByteDance-Seed/Multi-SWE-RL.
+        dataset_name: The dataset to use. Default is PrimeIntellect/Multi-SWE-RL.
         max_turns: Maximum number of turns per episode.
         total_timeout_minutes: Total timeout for the episode in minutes.
         test_timeout: Timeout for running tests in seconds.
@@ -938,13 +916,20 @@ def load_environment(
         docker_image = f"{x['org']}_m_{x['repo']}:pr-{x['number']}"
         repo = x["repo"]
 
+        # Construct workspace_dir_name in OpenHands style: repo__version
+        workspace_dir_name = repo
+
+        # Get base_commit for the prompt
+        base_commit = x.get("base_commit", "HEAD")
+
         return {
             "prompt": [
                 {
                     "role": "user",
                     "content": PROMPT_TEMPLATE.format(
                         problem_statement=problem_statement,
-                        repo=repo,
+                        workspace_dir_name=workspace_dir_name,
+                        base_commit=base_commit,
                     ),
                 }
             ],
@@ -952,7 +937,7 @@ def load_environment(
             "answer": "",
         }
 
-    # Load dataset directly using HuggingFace's load_dataset (same as mini_swe_agent_plus)
+    # Load dataset using HuggingFace's load_dataset
     dataset = load_dataset(dataset_name, split=split)
     dataset = dataset.map(process_example)
 
