@@ -485,7 +485,7 @@ class DockerSandbox:
 # ============================================================================
 
 
-class MultiSWEOpenHandsEnv(vf.Environment):
+class MultiSWEOpenHandsEnv(vf.MultiTurnEnv):
     """
     Multi-SWE RL Environment with OpenHands agent harness.
 
@@ -500,10 +500,9 @@ class MultiSWEOpenHandsEnv(vf.Environment):
 
     def __init__(
         self,
-        dataset: Any,
-        system_prompt: str,
-        parser: vf.Parser,
+        eval_dataset: Any,
         rubric: vf.Rubric,
+        system_prompt: str = SYSTEM_PROMPT,
         max_turns: int = 200,
         turn_timeout: int = 90,
         test_timeout: int = 1800,
@@ -513,10 +512,9 @@ class MultiSWEOpenHandsEnv(vf.Environment):
         **kwargs: Any,
     ) -> None:
         super().__init__(
-            dataset=dataset,
-            system_prompt=system_prompt,
-            parser=parser,
+            eval_dataset=eval_dataset,
             rubric=rubric,
+            system_prompt=system_prompt,
             max_turns=max_turns,
             **kwargs,
         )
@@ -1203,15 +1201,12 @@ def load_environment(
     dataset = load_dataset(dataset_name, split=split)
     dataset = dataset.map(process_example)
 
-    parser = vf.Parser()
-
     rubric = MultiSWERubric(dataset=dataset)
 
     return MultiSWEOpenHandsEnv(
-        dataset=dataset,
-        system_prompt=SYSTEM_PROMPT,
-        parser=parser,
+        eval_dataset=dataset,
         rubric=rubric,
+        system_prompt=SYSTEM_PROMPT,
         max_turns=max_turns,
         test_timeout=test_timeout,
         total_timeout_minutes=total_timeout_minutes,
