@@ -1,12 +1,13 @@
 [project]
 name = "multi-swe"
-description = "Multi-SWE RL Environment with OpenHands agent harness (Docker sandbox)"
-tags = ["multi-swe", "openhands", "train", "eval", "multilingual", "docker"]
-version = "0.3.0"
+description = "Multi-SWE RL Environment with OpenHands agent harness (swe-rex sandbox)"
+tags = ["multi-swe", "openhands", "train", "eval", "multilingual", "swerex"]
+version = "0.4.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.1.8",
     "multi-swe-bench",
+    "swerex>=0.8.0",
     "tenacity",
     "datasets",
 ]
@@ -16,7 +17,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-include = ["multi_swe.py"]
+include = ["multi_swe.py", "scripts/"]
 
 [tool.uv.sources]
 multi-swe-bench = {git = "https://github.com/multi-swe-bench/multi-swe-bench.git", rev = "e1c2bb6"}

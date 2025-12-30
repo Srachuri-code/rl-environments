@@ -5,19 +5,17 @@ This environment combines:
 - Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
 - Same reward functions as mini_swe_agent_plus
 - OpenHands agent harness (tools/actions) - EXACT implementation from MopenHands
-- Custom Docker sandbox infrastructure using subprocess (no external sandbox dependencies)
+- swe-rex for container management (same as Multi-SWE benchmark)
 """
 
 import asyncio
 import json
-import os
+import logging
 import pprint
 import shlex
-import subprocess
 import tempfile
 import traceback
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Union
 
@@ -28,8 +26,18 @@ from multi_swe_bench.harness.image import Config
 from multi_swe_bench.harness.instance import Instance
 from multi_swe_bench.harness.report import Report, generate_report
 from multi_swe_bench.harness.test_result import TestResult
+from swerex.deployment.docker import DockerDeployment
+from swerex.deployment.config import DockerDeploymentConfig
+from swerex.runtime.abstract import BashAction, CreateBashSessionRequest, WriteFileRequest
+from swerex.runtime.remote import RemoteRuntime
+from swerex.exceptions import CommandTimeoutError as SweRexTimeoutError
 from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
 from verifiers.types import ChatCompletionMessageToolCall, Info, Message, Messages, ProcessedOutputs, State
+
+
+# Suppress noisy loggers
+logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+logging.getLogger("swerex").setLevel(logging.WARNING)
 
 
 # ============================================================================
@@ -147,19 +155,6 @@ class CommandTimeoutError(SandboxError):
 class ContainerError(SandboxError):
     """Raised when there's a container infrastructure error."""
     pass
-
-
-# ============================================================================
-# Execution Result
-# ============================================================================
-
-
-@dataclass
-class ExecResult:
-    """Result of executing a command in a sandbox."""
-    return_code: int
-    stdout: str
-    stderr: str
 
 
 # ============================================================================
@@ -291,7 +286,7 @@ def _is_transient_error(exception: Exception) -> bool:
     """Check if exception is a transient error that should be retried."""
     error_str = str(exception).lower()
     # Retry on common transient errors
-    return any(err in error_str for err in ["timeout", "connection", "unavailable", "refused"])
+    return any(err in error_str for err in ["timeout", "connection", "unavailable", "refused", "503", "502"])
 
 
 # Environment variables for sandbox
@@ -300,185 +295,143 @@ ENV_VARS = f"{PATH};PAGER=cat;MANPAGER=cat;LESS=-R;PIP_PROGRESS_BAR=off;TQDM_DIS
 
 
 # ============================================================================
-# Docker Sandbox (Custom Implementation using subprocess)
+# swe-rex Sandbox Wrapper
 # ============================================================================
 
 
-class DockerSandbox:
+class SweRexSandbox:
     """
-    Custom Docker sandbox using subprocess to manage containers.
-    No external dependencies - uses docker CLI directly.
+    Wrapper around swe-rex DockerDeployment for managing containers.
+    This is the same approach used by the Multi-SWE benchmark.
     """
 
     def __init__(
         self,
         docker_image: str,
-        container_name: str,
-        cpu_cores: int = 8,
-        memory_mb: int = 8192,
-        logger=None,
+        session_name: str = "main",
+        startup_timeout: int = 120,
+        logger: logging.Logger | None = None,
     ):
         """
-        Initialize a Docker sandbox.
+        Initialize a swe-rex sandbox.
 
         Args:
-            docker_image: The Docker image to use (e.g., "mswebench/org_m_repo:pr-123")
-            container_name: Unique container name/ID
-            cpu_cores: Number of CPU cores
-            memory_mb: Memory in MB
+            docker_image: Full Docker image name (e.g., "mswebench/pandas-dev_m_pandas:pr-12345")
+            session_name: Name for the bash session
+            startup_timeout: Timeout for container startup
             logger: Logger instance
         """
         self.docker_image = docker_image
-        self.container_name = container_name
-        self.cpu_cores = cpu_cores
-        self.memory_mb = memory_mb
-        self.logger = logger
+        self.session_name = session_name
+        self.startup_timeout = startup_timeout
+        self.logger = logger or logging.getLogger(__name__)
+        
+        self._deployment: DockerDeployment | None = None
+        self._runtime: RemoteRuntime | None = None
         self._started = False
 
-    async def _run_docker_cmd(
-        self,
-        args: list[str],
-        timeout: int | None = None,
-        check: bool = True,
-    ) -> subprocess.CompletedProcess:
-        """Run a docker command asynchronously."""
-        cmd = ["docker"] + args
-        
-        def _run():
-            return subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _run)
-        
-        if check and result.returncode != 0:
-            raise ContainerError(
-                f"Docker command failed: {' '.join(cmd)}\n"
-                f"stdout: {result.stdout}\nstderr: {result.stderr}"
-            )
-        return result
-
     async def start(self) -> None:
-        """Start the sandbox container."""
+        """Start the sandbox container using swe-rex."""
         if self._started:
             return
 
-        # Check if container already exists
-        result = await self._run_docker_cmd(
-            ["ps", "-a", "-q", "-f", f"name=^{self.container_name}$"],
-            check=False,
+        config = DockerDeploymentConfig(
+            image=self.docker_image,
+            port=None,  # Auto-assign port
+            startup_timeout=self.startup_timeout,
+            pull="never",  # Images should be pre-warmed
+            remove_container=True,  # Clean up on stop
+            remove_images=False,  # Keep images for reuse
+            python_standalone_dir=None,  # Use default Python
+        )
+
+        self._deployment = DockerDeployment(logger=self.logger, **config.model_dump())
+        
+        self.logger.debug(f"Starting swe-rex container for {self.docker_image}")
+        await self._deployment.start()
+        
+        self._runtime = self._deployment.runtime
+        
+        # Create a bash session for command execution
+        await self._runtime.create_session(
+            CreateBashSessionRequest(
+                session=self.session_name,
+                startup_source=["/root/.bashrc"],
+                startup_timeout=self.startup_timeout,
+            )
         )
         
-        if result.stdout.strip():
-            # Container exists, remove it first
-            await self._run_docker_cmd(["rm", "-f", self.container_name], check=False)
-
-        # Start new container
-        run_args = [
-            "run",
-            "-d",  # Detached mode
-            "--name", self.container_name,
-            "--cpus", str(self.cpu_cores),
-            "--memory", f"{self.memory_mb}m",
-            "--network", "none",  # Isolated network
-            self.docker_image,
-            "tail", "-f", "/dev/null",  # Keep container running
-        ]
-        
-        await self._run_docker_cmd(run_args, timeout=120)
         self._started = True
+        self.logger.debug(f"swe-rex container started: {self._deployment.container_name}")
 
-        if self.logger:
-            self.logger.debug(f"Started container {self.container_name}")
-
-    async def stop(self, delete: bool = True) -> None:
+    async def stop(self) -> None:
         """Stop the sandbox container."""
         if not self._started:
             return
 
         try:
-            await self._run_docker_cmd(["stop", "-t", "5", self.container_name], check=False, timeout=30)
-            if delete:
-                await self._run_docker_cmd(["rm", "-f", self.container_name], check=False, timeout=30)
+            if self._deployment:
+                await self._deployment.stop()
         except Exception as e:
-            if self.logger:
-                self.logger.warning(f"Error stopping container {self.container_name}: {e}")
+            self.logger.warning(f"Error stopping swe-rex container: {e}")
         finally:
+            self._deployment = None
+            self._runtime = None
             self._started = False
 
     async def exec(
         self,
         command: str,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        timeout_sec: int | None = None,
-    ) -> ExecResult:
-        """Execute a command in the sandbox."""
-        if not self._started:
+        timeout: int = 90,
+    ) -> tuple[int, str]:
+        """
+        Execute a command in the sandbox.
+
+        Args:
+            command: Command to execute
+            cwd: Working directory (prepended as cd command)
+            timeout: Command timeout in seconds
+
+        Returns:
+            Tuple of (exit_code, output)
+        """
+        if not self._started or not self._runtime:
             raise SandboxError("Sandbox not started")
 
-        exec_args = ["exec"]
-        
-        # Add working directory
+        # Prepend cd if working directory specified
         if cwd:
-            exec_args.extend(["-w", cwd])
-        
-        # Add environment variables
-        if env:
-            for key, value in env.items():
-                exec_args.extend(["-e", f"{key}={value}"])
-        
-        exec_args.append(self.container_name)
-        exec_args.extend(["bash", "-c", command])
+            command = f"cd {shlex.quote(cwd)} && {command}"
 
         try:
-            result = await self._run_docker_cmd(
-                exec_args,
-                timeout=timeout_sec,
-                check=False,  # Don't raise on non-zero exit
+            result = await self._runtime.run_in_session(
+                BashAction(
+                    session=self.session_name,
+                    command=command,
+                    timeout=timeout,
+                    set_last_action=True,
+                    check="silent",
+                )
             )
-            return ExecResult(
-                return_code=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
-            )
-        except subprocess.TimeoutExpired:
-            raise asyncio.TimeoutError(f"Command timed out after {timeout_sec}s")
+            return (result.exit_code, result.output)
+        except SweRexTimeoutError:
+            raise asyncio.TimeoutError(f"Command timed out after {timeout}s")
 
-    async def upload_file(self, source_path: Path | str, target_path: str) -> None:
-        """Upload a file to the sandbox using docker cp."""
-        if not self._started:
+    async def write_file(self, path: str, content: str) -> None:
+        """Write content to a file in the sandbox."""
+        if not self._started or not self._runtime:
             raise SandboxError("Sandbox not started")
 
-        await self._run_docker_cmd(
-            ["cp", str(source_path), f"{self.container_name}:{target_path}"],
-            timeout=60,
+        await self._runtime.write_file(
+            WriteFileRequest(path=path, content=content)
         )
 
-    async def upload_content(self, content: bytes, target_path: str) -> None:
-        """Upload content to a file in the sandbox."""
-        with tempfile.NamedTemporaryFile(delete=False, mode='wb') as f:
-            f.write(content)
-            temp_path = f.name
-
-        try:
-            await self.upload_file(temp_path, target_path)
-        finally:
-            os.unlink(temp_path)
-
-    async def download_file(self, source_path: str, target_path: Path | str) -> None:
-        """Download a file from the sandbox using docker cp."""
-        if not self._started:
-            raise SandboxError("Sandbox not started")
-
-        await self._run_docker_cmd(
-            ["cp", f"{self.container_name}:{source_path}", str(target_path)],
-            timeout=60,
-        )
+    @property
+    def container_name(self) -> str | None:
+        """Get the container name."""
+        if self._deployment:
+            return self._deployment.container_name
+        return None
 
 
 # ============================================================================
@@ -490,13 +443,13 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
     """
     Multi-SWE RL Environment with OpenHands agent harness.
 
-    Uses custom Docker sandbox (subprocess-based, no external dependencies).
+    Uses swe-rex for container management (same as Multi-SWE benchmark).
 
     Combines:
     - Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
     - Reward functions from mini_swe_agent_plus
     - OpenHands-style tools: execute_bash, str_replace_editor, finish
-    - Custom Docker sandbox infrastructure
+    - swe-rex Docker sandbox infrastructure
     """
 
     def __init__(
@@ -508,8 +461,7 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
         turn_timeout: int = 90,
         test_timeout: int = 1800,
         total_timeout_minutes: int = 120,
-        cpu_cores: int = 2,
-        memory_gb: int = 4,
+        startup_timeout: int = 120,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -524,11 +476,10 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
         self.turn_timeout = turn_timeout
         self.test_timeout = test_timeout
         self.total_timeout_minutes = total_timeout_minutes
-        self.cpu_cores = cpu_cores
-        self.memory_mb = memory_gb * 1024
+        self.startup_timeout = startup_timeout
 
         # Track active sandboxes for cleanup
-        self.active_sandboxes: dict[str, DockerSandbox] = {}
+        self.active_sandboxes: dict[str, SweRexSandbox] = {}
 
         # Add OpenHands-style tools
         # Per MopenHands SWE-bench config: codeact_enable_jupyter=False, codeact_enable_llm_editor=False
@@ -550,19 +501,20 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
     async def _execute_command(
         self, command: str, sandbox_id: str, timeout: int = 90, working_dir: str = None
     ) -> tuple[int, str]:
-        """Execute command inside persistent sandbox container using Harbor."""
-        self.logger.debug(f"Executing command {command} in sandbox {sandbox_id}")
+        """Execute command inside persistent sandbox container."""
+        self.logger.debug(f"Executing command in sandbox {sandbox_id}: {command[:100]}...")
 
         sandbox = self.active_sandboxes.get(sandbox_id)
         if not sandbox:
             raise SandboxError(f"Sandbox {sandbox_id} not found")
 
         try:
-            result: ExecResult = await sandbox.exec(
+            exit_code, output = await sandbox.exec(
                 command=command,
                 cwd=working_dir,
-                timeout_sec=timeout,
+                timeout=timeout,
             )
+            return (exit_code, output.strip() or "(no output)")
         except asyncio.TimeoutError:
             self.logger.warning(f"Command timed out after {timeout}s: {command}")
             return (
@@ -577,36 +529,16 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
             self.logger.error(traceback.format_exc())
             return (1, "Command failed due to infrastructure error. Try the same command again!")
 
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
-        combined = stdout
-        if stderr:
-            if combined:
-                combined = f"{combined}\nstderr:\n{stderr}"
-            else:
-                combined = f"stderr:\n{stderr}"
-        output = combined or "(no output)"
-        return result.return_code, output
-
     async def execute_command_raise_on_error(
         self, sandbox_id: str, command: str, working_dir: str = None, timeout: int = 90
-    ) -> ExecResult:
+    ) -> tuple[int, str]:
         """Execute command and raise on error."""
-        sandbox = self.active_sandboxes.get(sandbox_id)
-        if not sandbox:
-            raise SandboxError(f"Sandbox {sandbox_id} not found")
-
-        result = await sandbox.exec(
-            command=command,
-            cwd=working_dir,
-            timeout_sec=timeout,
-        )
-        if result.return_code != 0:
+        exit_code, output = await self._execute_command(command, sandbox_id, timeout, working_dir)
+        if exit_code != 0:
             raise RuntimeError(
-                f"Error executing command: {command} return_code={result.return_code} "
-                f"stdout={result.stdout} stderr={result.stderr}"
+                f"Error executing command: {command} return_code={exit_code} output={output}"
             )
-        return result
+        return (exit_code, output)
 
     def _format_observation(self, exit_code: int, output: str) -> str:
         """Format tool output in OpenHands observation format."""
@@ -781,7 +713,7 @@ print(f"Successfully replaced in {{path}}")
         return "OBSERVATION:\n<<<FINISH>>>\nYour task has been completed. The changes will now be evaluated."
 
     # ========================================================================
-    # Sandbox Setup (using custom Docker sandbox)
+    # Sandbox Setup (using swe-rex)
     # ========================================================================
 
     async def setup_repo(self, sandbox_id: str, state: State):
@@ -790,61 +722,61 @@ print(f"Successfully replaced in {{path}}")
         instance_id = info["instance_id"]
 
         # Install curl if needed
-        result = await self.execute_command_raise_on_error(
+        exit_code, output = await self.execute_command_raise_on_error(
             sandbox_id,
             "which curl || (apt-get update && apt-get install -y curl)",
             working_dir="/home",
             timeout=300,
         )
-        self.logger.debug(f"CURL install results for {instance_id=}: {result.stdout} {result.stderr}")
+        self.logger.debug(f"CURL install results for {instance_id=}: {output}")
 
         # Install uv
-        result = await self.execute_command_raise_on_error(
+        exit_code, output = await self.execute_command_raise_on_error(
             sandbox_id,
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             working_dir="/home",
             timeout=300,
         )
-        self.logger.debug(f"UV install results: {result.stdout} {result.stderr}")
+        self.logger.debug(f"UV install results: {output}")
 
         # Delete pre-existing fix.patch
-        await self.execute_command_raise_on_error(
-            sandbox_id, "rm -f /home/fix.patch", working_dir="/home"
+        await self._execute_command(
+            "rm -f /home/fix.patch", sandbox_id, timeout=30, working_dir="/home"
         )
 
     async def setup_state(self, state: State, **kwargs: Any) -> State:
-        """Create per-rollout sandbox using Docker."""
+        """Create per-rollout sandbox using swe-rex."""
         docker_image = state["info"]["docker_image"]
-        self.logger.info(f"Setting up Docker sandbox for image: {docker_image}")
+        self.logger.info(f"Setting up swe-rex sandbox for image: {docker_image}")
 
-        # Create unique container name
-        container_name = f"multi-swe-{uuid.uuid4().hex[:12]}"
+        # Create unique session ID
+        session_id = f"multi-swe-{uuid.uuid4().hex[:12]}"
         full_image = f"mswebench/{docker_image}".lower()
 
         try:
-            # Create and start Docker sandbox
-            sandbox = DockerSandbox(
+            # Create and start swe-rex sandbox
+            sandbox = SweRexSandbox(
                 docker_image=full_image,
-                container_name=container_name,
-                cpu_cores=self.cpu_cores,
-                memory_mb=self.memory_mb,
+                session_name="main",
+                startup_timeout=self.startup_timeout,
                 logger=self.logger,
             )
 
-            self.logger.debug(f"Starting Docker sandbox {container_name}...")
+            self.logger.debug(f"Starting swe-rex sandbox {session_id}...")
             await sandbox.start()
 
-            # Store sandbox reference
-            self.active_sandboxes[container_name] = sandbox
-            state["sandbox_id"] = container_name
+            # Store sandbox reference using container name as ID
+            sandbox_id = sandbox.container_name or session_id
+            self.active_sandboxes[sandbox_id] = sandbox
+            state["sandbox_id"] = sandbox_id
 
             # Setup repository
-            self.logger.debug(f"Setting up repository for sandbox {container_name}...")
-            await self.setup_repo(container_name, state)
-            self.logger.debug(f"Docker sandbox {container_name} is ready.")
+            self.logger.debug(f"Setting up repository for sandbox {sandbox_id}...")
+            await self.setup_repo(sandbox_id, state)
+            self.logger.debug(f"swe-rex sandbox {sandbox_id} is ready.")
 
         except Exception as e:
-            self.logger.error(f"Error creating Docker sandbox:\n\n{repr(e)}")
+            self.logger.error(f"Error creating swe-rex sandbox:\n\n{repr(e)}")
             self.logger.error(traceback.format_exc())
             state["sandbox_id"] = None
             state["sandbox_error"] = 1
@@ -856,7 +788,7 @@ print(f"Successfully replaced in {{path}}")
         sandbox = self.active_sandboxes.pop(sandbox_id, None)
         if sandbox:
             try:
-                await sandbox.stop(delete=True)
+                await sandbox.stop()
             except Exception as e:
                 self.logger.warning(f"Error destroying sandbox {sandbox_id}: {repr(e)}")
 
@@ -978,29 +910,26 @@ print(f"Successfully replaced in {{path}}")
         if not sandbox:
             raise SandboxError(f"Sandbox {sandbox_id} not found")
 
-        # Upload create_fix_patch script
-        await sandbox.upload_content(
-            CREATE_FIX_PATCH_SCRIPT.encode(),
-            "/home/create_fix_patch.sh"
-        )
+        # Upload create_fix_patch script using swe-rex
+        await sandbox.write_file("/home/create_fix_patch.sh", CREATE_FIX_PATCH_SCRIPT)
 
         # Run create_fix_patch script
-        result = await sandbox.exec(
+        exit_code, output = await sandbox.exec(
             command=f"{ENV_VARS} bash /home/create_fix_patch.sh",
             cwd=f"/home/{repo}",
-            timeout_sec=min(test_timeout, 300),
+            timeout=min(test_timeout, 300),
         )
-        self.logger.debug(f"create_fix_patch.sh results for {instance_id=}: {result.stdout} {result.stderr}")
+        self.logger.debug(f"create_fix_patch.sh results for {instance_id=}: {output}")
 
         # Run fix-run.sh to apply patch and run tests
         try:
-            result = await sandbox.exec(
+            exit_code, output = await sandbox.exec(
                 command=f"{ENV_VARS} bash -o pipefail -c 'bash /home/fix-run.sh 2>&1 | tee /home/test_output.txt'",
                 cwd=f"/home/{repo}",
-                timeout_sec=test_timeout,
+                timeout=test_timeout,
             )
-            if result.return_code != 0:
-                self.logger.warning(f"fix-run.sh returned non-zero exit code: {result.return_code}")
+            if exit_code != 0:
+                self.logger.warning(f"fix-run.sh returned non-zero exit code: {exit_code}")
         except asyncio.TimeoutError:
             self.logger.error(f"Command timed out: bash /home/fix-run.sh after {test_timeout}s")
             state["sandbox_error"] = 1
@@ -1011,8 +940,10 @@ print(f"Successfully replaced in {{path}}")
             return ""
 
         # Read test output
-        result = await self.execute_command_raise_on_error(sandbox_id, "cat /home/test_output.txt")
-        return result.stdout or ""
+        exit_code, test_output = await self._execute_command(
+            "cat /home/test_output.txt", sandbox_id, timeout=60
+        )
+        return test_output or ""
 
     async def post_rollout(self, state: State) -> None:
         """Run tests after rollout completes."""
@@ -1151,18 +1082,20 @@ def load_environment(
     max_turns: int = 200,
     total_timeout_minutes: int = 120,
     test_timeout: int = 1800,
+    startup_timeout: int = 120,
     **kwargs: Any,
 ) -> vf.Environment:
     """
     Load the Multi-SWE environment with OpenHands agent harness.
 
-    Uses custom Docker sandbox (subprocess-based, no external dependencies).
+    Uses swe-rex for container management (same as Multi-SWE benchmark).
 
     Args:
         dataset_name: The dataset to use. Default is PrimeIntellect/Multi-SWE-RL.
         max_turns: Maximum number of turns per episode.
         total_timeout_minutes: Total timeout for the episode in minutes.
         test_timeout: Timeout for running tests in seconds.
+        startup_timeout: Timeout for container startup in seconds.
         **kwargs: Additional arguments passed to the environment.
 
     Returns:
@@ -1219,6 +1152,7 @@ def load_environment(
         max_turns=max_turns,
         test_timeout=test_timeout,
         total_timeout_minutes=total_timeout_minutes,
+        startup_timeout=startup_timeout,
     )
 
 
