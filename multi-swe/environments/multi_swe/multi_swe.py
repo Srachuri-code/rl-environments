@@ -30,8 +30,14 @@ from swerex.deployment.docker import DockerDeployment
 from swerex.deployment.config import DockerDeploymentConfig
 from swerex.runtime.abstract import BashAction, CreateBashSessionRequest, WriteFileRequest
 from swerex.runtime.remote import RemoteRuntime
+from swerex.runtime.config import RemoteRuntimeConfig
 from swerex.exceptions import CommandTimeoutError as SweRexTimeoutError
+from swerex.utils.free_port import find_free_port
 from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
+
+# Nix container image for Multi-SWE benchmark
+NIX_SWE_IMAGE = "mswebench/nix_swe:v1.0"
+NIX_SWE_CONTAINER_NAME = "nix_swe"
 from verifiers.types import ChatCompletionMessageToolCall, Info, Message, Messages, ProcessedOutputs, State
 
 
@@ -295,14 +301,155 @@ ENV_VARS = f"{PATH};PAGER=cat;MANPAGER=cat;LESS=-R;PIP_PROGRESS_BAR=off;TQDM_DIS
 
 
 # ============================================================================
-# swe-rex Sandbox Wrapper
+# swe-rex Sandbox Wrapper (using nix container like multi-swe-bench)
 # ============================================================================
+
+
+def ensure_nix_container_running() -> bool:
+    """
+    Ensure the nix_swe container is running.
+    This container provides Python to the Multi-SWE benchmark containers.
+    
+    Returns:
+        True if container is running, False if failed to start.
+    """
+    import subprocess
+    
+    # Check if nix_swe container exists
+    result = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"name={NIX_SWE_CONTAINER_NAME}", "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+    )
+    
+    if NIX_SWE_CONTAINER_NAME in result.stdout:
+        # Container exists, check if running
+        result = subprocess.run(
+            ["docker", "ps", "--filter", f"name={NIX_SWE_CONTAINER_NAME}", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+        )
+        if NIX_SWE_CONTAINER_NAME in result.stdout:
+            return True  # Already running
+        # Exists but not running - start it
+        subprocess.run(["docker", "start", NIX_SWE_CONTAINER_NAME], capture_output=True)
+        return True
+    
+    # Container doesn't exist - create it
+    result = subprocess.run(
+        ["docker", "run", "-d", "--name", NIX_SWE_CONTAINER_NAME, NIX_SWE_IMAGE, "sleep", "infinity"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+class MultiSweBenchDeployment(DockerDeployment):
+    """
+    Custom DockerDeployment that matches multi-swe-bench's approach.
+    This uses a shared nix container to provide Python to the task containers.
+    """
+    
+    def __init__(self, *, logger: logging.Logger | None = None, **kwargs):
+        super().__init__(logger=logger, **kwargs)
+
+    @classmethod
+    def from_config(
+        cls, logger: logging.Logger | None, config: DockerDeploymentConfig
+    ) -> "MultiSweBenchDeployment":
+        return cls(logger=logger, **config.model_dump())
+
+    def _get_swerex_start_cmd(self, prefix_cmd: str, token: str) -> list[str]:
+        """
+        Build the command to start swe-rex inside the container.
+        This patches swe-rex's local.py to preserve environment variables.
+        """
+        from swerex import PACKAGE_NAME, REMOTE_EXECUTABLE_NAME
+        
+        pipx_install = "/nix/swalm/nix-env/bin/python -m pip install pipx && /nix/swalm/nix-env/bin/python -m pipx ensurepath"
+        sed_cmd = 'sed -i \'s|env={"PS1": self._ps1, "PS2": "", "PS0": ""}|env=dict(os.environ.copy(), **{"PS1": self._ps1, "PS2": "", "PS0": ""})|\' /root/venv/lib/python3.11/site-packages/swerex/runtime/local.py'
+        sed_cmd1 = "sed -i '1i import os\n' /root/venv/lib/python3.11/site-packages/swerex/runtime/local.py"
+        rex_args = f"--auth-token {token}"
+        
+        if self._config.python_standalone_dir:
+            cmd = f"{prefix_cmd} && {sed_cmd} && {sed_cmd1} && {REMOTE_EXECUTABLE_NAME} {rex_args}"
+        else:
+            cmd = f"{prefix_cmd} && {sed_cmd} && {sed_cmd1} && {REMOTE_EXECUTABLE_NAME} {rex_args} || ({pipx_install} && pipx run {PACKAGE_NAME} {rex_args})"
+        
+        return ["/bin/sh", "-c", cmd]
+
+    async def start(self):
+        """Start the container with nix volume mounted."""
+        import time
+        import subprocess
+        
+        self._pull_image()
+        
+        if self._config.python_standalone_dir is not None:
+            image_id = self._build_image()
+        else:
+            image_id = self._config.image
+        
+        if self._config.port is None:
+            self._config.port = find_free_port()
+        
+        assert self._container_name is None
+        self._container_name = self._get_container_name()
+        token = self._get_token()
+        
+        platform_arg = []
+        if self._config.platform is not None:
+            platform_arg = ["--platform", self._config.platform]
+        
+        # Command to install swe-rex using nix Python
+        prefix_cmd = (
+            "/nix/swalm/nix-env/bin/python -m venv /root/venv && "
+            "/root/venv/bin/pip install --no-cache-dir swe-rex && "
+            "ln -s /root/venv/bin/swerex-remote /usr/local/bin/swerex-remote"
+        )
+        
+        cmds = [
+            "docker",
+            "run",
+            "--rm",
+            "--volumes-from",
+            NIX_SWE_CONTAINER_NAME,  # Mount volumes from nix container
+            "-p",
+            f"{self._config.port}:8000",
+            *platform_arg,
+            *self._config.docker_args,
+            "--name",
+            self._container_name,
+            image_id,
+            *self._get_swerex_start_cmd(prefix_cmd=prefix_cmd, token=token),
+        ]
+        
+        cmd_str = shlex.join(cmds)
+        self.logger.info(f"Starting container {self._container_name} with image {self._config.image} serving on port {self._config.port}")
+        self.logger.debug(f"Command: {cmd_str!r}")
+        
+        self._container_process = subprocess.Popen(
+            cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        
+        self.logger.info(f"Starting runtime at {self._config.port}")
+        self._runtime = RemoteRuntime.from_config(
+            RemoteRuntimeConfig(
+                port=self._config.port, 
+                timeout=self._runtime_timeout, 
+                auth_token=token
+            )
+        )
+        
+        t0 = time.time()
+        await self._wait_until_alive(timeout=self._config.startup_timeout)
+        self.logger.info(f"Runtime started in {time.time() - t0:.2f}s")
 
 
 class SweRexSandbox:
     """
     Wrapper around swe-rex DockerDeployment for managing containers.
-    This is the same approach used by the Multi-SWE benchmark.
+    Uses the same nix container approach as multi-swe-bench.
     """
 
     def __init__(
@@ -326,26 +473,35 @@ class SweRexSandbox:
         self.startup_timeout = startup_timeout
         self.logger = logger or logging.getLogger(__name__)
         
-        self._deployment: DockerDeployment | None = None
+        self._deployment: MultiSweBenchDeployment | None = None
         self._runtime: RemoteRuntime | None = None
         self._started = False
 
     async def start(self) -> None:
-        """Start the sandbox container using swe-rex."""
+        """Start the sandbox container using swe-rex with nix volume."""
         if self._started:
             return
 
+        # Ensure nix container is running (provides Python)
+        if not ensure_nix_container_running():
+            raise SandboxError(
+                f"Failed to start nix container ({NIX_SWE_IMAGE}). "
+                f"Try running: docker pull {NIX_SWE_IMAGE}"
+            )
+        
         config = DockerDeploymentConfig(
             image=self.docker_image,
             port=None,  # Auto-assign port
             startup_timeout=self.startup_timeout,
             pull="never",  # Images should be pre-warmed
-            remove_container=True,  # Clean up on stop
+            remove_container=True,  # Clean up on stop (--rm)
             remove_images=False,  # Keep images for reuse
-            python_standalone_dir=None,  # Use default Python
+            python_standalone_dir=None,  # We use nix container instead
         )
 
-        self._deployment = DockerDeployment(logger=self.logger, **config.model_dump())
+        self._deployment = MultiSweBenchDeployment.from_config(
+            logger=self.logger, config=config
+        )
         
         self.logger.debug(f"Starting swe-rex container for {self.docker_image}")
         await self._deployment.start()
@@ -362,7 +518,7 @@ class SweRexSandbox:
         )
         
         self._started = True
-        self.logger.debug(f"swe-rex container started: {self._deployment.container_name}")
+        self.logger.debug(f"swe-rex container started: {self._deployment._container_name}")
 
     async def stop(self) -> None:
         """Stop the sandbox container."""

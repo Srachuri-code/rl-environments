@@ -17,7 +17,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-include = ["multi_swe.py", "scripts/"]
+include = ["multi_swe.py"]
 
 [tool.uv.sources]
 multi-swe-bench = {git = "https://github.com/multi-swe-bench/multi-swe-bench.git", rev = "e1c2bb6"}
