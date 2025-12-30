@@ -80,22 +80,42 @@ async def pull_image(image: str, semaphore: asyncio.Semaphore) -> tuple[str, boo
             return (image, False, str(e))
 
 
-def get_all_images(dataset_name: str, split: str = "train", limit: int | None = None) -> Set[str]:
+def get_all_images(
+    dataset_name: str,
+    split: str = "train",
+    limit: int | None = None,
+    instance_ids: list[str] | None = None,
+) -> list[tuple[str, int]]:
     """
-    Extract all unique Docker image names from the dataset.
+    Extract Docker image names from the dataset.
+    
+    Args:
+        dataset_name: HuggingFace dataset name
+        split: Dataset split
+        limit: Maximum number of images (by index order)
+        instance_ids: Specific instance IDs to warm (overrides limit)
     
     Returns:
-        Set of full image names (e.g., "mswebench/pandas-dev_m_pandas:pr-12345")
+        List of (image_name, index) tuples for tracking which images to use
     """
     logger.info(f"Loading dataset: {dataset_name}")
     dataset = load_dataset(dataset_name, split=split)
     
-    images = set()
+    images = []
+    seen = set()
+    
     for i, row in enumerate(dataset):
-        if limit and i >= limit:
+        # If specific instance_ids provided, filter by them
+        if instance_ids:
+            if row.get("instance_id") not in instance_ids:
+                continue
+        elif limit and i >= limit:
             break
+        
         image = f"mswebench/{row['org']}_m_{row['repo']}:pr-{row['number']}".lower()
-        images.add(image)
+        if image not in seen:
+            images.append((image, i))
+            seen.add(image)
     
     logger.info(f"Found {len(images)} unique images")
     return images
@@ -106,6 +126,8 @@ async def warm_all_images(
     split: str = "train",
     max_concurrent: int = 8,
     limit: int | None = None,
+    instance_ids: list[str] | None = None,
+    output_indices: bool = False,
 ) -> dict:
     """
     Pre-pull all Multi-SWE Docker images.
@@ -115,16 +137,18 @@ async def warm_all_images(
         split: Dataset split to use
         max_concurrent: Maximum concurrent pulls
         limit: Maximum number of images to pull (None for all)
+        instance_ids: Specific instance IDs to warm
+        output_indices: If True, print dataset indices for use with vf-eval
     
     Returns:
         Dictionary with statistics about the warming process
     """
-    images = get_all_images(dataset_name, split, limit)
+    images_with_indices = get_all_images(dataset_name, split, limit, instance_ids)
     
-    logger.info(f"Starting to warm {len(images)} images with {max_concurrent} concurrent pulls")
+    logger.info(f"Starting to warm {len(images_with_indices)} images with {max_concurrent} concurrent pulls")
     
     semaphore = asyncio.Semaphore(max_concurrent)
-    tasks = [pull_image(img, semaphore) for img in images]
+    tasks = [pull_image(img, semaphore) for img, idx in images_with_indices]
     results = await asyncio.gather(*tasks)
     
     # Collect statistics
@@ -134,6 +158,7 @@ async def warm_all_images(
         "already_existed": 0,
         "failed": 0,
         "failed_images": [],
+        "indices": [idx for _, idx in images_with_indices],
     }
     
     for image, success, message in results:
@@ -145,12 +170,26 @@ async def warm_all_images(
             stats["failed"] += 1
             stats["failed_images"].append((image, message))
     
+    # Output indices for easy use with vf-eval
+    if output_indices and stats["indices"]:
+        logger.info(f"Dataset indices warmed: {stats['indices'][:20]}{'...' if len(stats['indices']) > 20 else ''}")
+    
     return stats
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Pre-warm Multi-SWE Docker images for faster training"
+        description="Pre-warm Multi-SWE Docker images for faster training",
+        epilog="""
+Examples:
+  # Warm first 10 images, then run eval on same 10
+  python warm_images.py --limit 10
+  vf-eval multi-swe -m gpt-4.1-mini -n 10
+
+  # Warm all images (takes a while)
+  python warm_images.py --concurrent 16
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--dataset",
@@ -199,6 +238,7 @@ def main():
             split=args.split,
             max_concurrent=args.concurrent,
             limit=args.limit,
+            output_indices=True,
         )
     )
     
@@ -219,6 +259,11 @@ def main():
             print(f"  ... and {len(stats['failed_images']) - 10} more")
     
     print("=" * 60)
+    
+    # Show how to run eval on these exact images
+    if stats["total"] > 0:
+        print(f"\nTo eval on these {stats['total']} warmed images:")
+        print(f"  vf-eval multi-swe -m gpt-4.1-mini -n {stats['total']}")
     
     return 0 if stats["failed"] == 0 else 1
 
