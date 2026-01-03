@@ -1238,7 +1238,7 @@ def load_environment(
     max_turns: int = 200,
     total_timeout_minutes: int = 120,
     test_timeout: int = 1800,
-    startup_timeout: int = 120,
+    startup_timeout: int = 300,  # 5 min to allow pip install with concurrent containers
     **kwargs: Any,
 ) -> vf.Environment:
     """
