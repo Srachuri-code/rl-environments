@@ -435,6 +435,7 @@ class MultiSweBenchDeployment(DockerDeployment):
         self.logger.info(f"Starting runtime at {self._config.port}")
         self._runtime = RemoteRuntime.from_config(
             RemoteRuntimeConfig(
+                host="localhost",
                 port=self._config.port, 
                 timeout=self._runtime_timeout, 
                 auth_token=token
