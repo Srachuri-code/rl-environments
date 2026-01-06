@@ -5,7 +5,7 @@ This environment combines:
 - Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
 - Same reward functions as mini_swe_agent_plus
 - OpenHands agent harness (tools/actions) - EXACT implementation from MopenHands
-- swe-rex for container management (same as Multi-SWE benchmark)
+- Simple Docker subprocess for container management (like mini_swe_agent_bench)
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import json
 import logging
 import pprint
 import shlex
+import subprocess
 import tempfile
 import traceback
 import uuid
@@ -26,24 +27,13 @@ from multi_swe_bench.harness.image import Config
 from multi_swe_bench.harness.instance import Instance
 from multi_swe_bench.harness.report import Report, generate_report
 from multi_swe_bench.harness.test_result import TestResult
-from swerex.deployment.docker import DockerDeployment
-from swerex.deployment.config import DockerDeploymentConfig
-from swerex.runtime.abstract import BashAction, CreateBashSessionRequest, WriteFileRequest
-from swerex.runtime.remote import RemoteRuntime
-from swerex.runtime.config import RemoteRuntimeConfig
-from swerex.exceptions import CommandTimeoutError as SweRexTimeoutError
-from swerex.utils.free_port import find_free_port
 from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
 
-# Nix container image for Multi-SWE benchmark
-NIX_SWE_IMAGE = "mswebench/nix_swe:v1.0"
-NIX_SWE_CONTAINER_NAME = "nix_swe"
 from verifiers.types import ChatCompletionMessageToolCall, Info, Message, Messages, ProcessedOutputs, State
 
 
 # Suppress noisy loggers
 logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
-logging.getLogger("swerex").setLevel(logging.WARNING)
 
 
 # ============================================================================
@@ -301,249 +291,92 @@ ENV_VARS = f"{PATH};PAGER=cat;MANPAGER=cat;LESS=-R;PIP_PROGRESS_BAR=off;TQDM_DIS
 
 
 # ============================================================================
-# swe-rex Sandbox Wrapper (using nix container like multi-swe-bench)
+# Simple Docker Sandbox (subprocess-based, like mini_swe_agent_bench)
 # ============================================================================
 
 
-def ensure_nix_container_running() -> bool:
+class DockerSandbox:
     """
-    Ensure the nix_swe container is running.
-    This container provides Python to the Multi-SWE benchmark containers.
-    
-    Returns:
-        True if container is running, False if failed to start.
-    """
-    import subprocess
-    
-    # Check if nix_swe container exists
-    result = subprocess.run(
-        ["docker", "ps", "-a", "--filter", f"name={NIX_SWE_CONTAINER_NAME}", "--format", "{{.Names}}"],
-        capture_output=True,
-        text=True,
-    )
-    
-    if NIX_SWE_CONTAINER_NAME in result.stdout:
-        # Container exists, check if running
-        result = subprocess.run(
-            ["docker", "ps", "--filter", f"name={NIX_SWE_CONTAINER_NAME}", "--format", "{{.Names}}"],
-            capture_output=True,
-            text=True,
-        )
-        if NIX_SWE_CONTAINER_NAME in result.stdout:
-            return True  # Already running
-        # Exists but not running - start it
-        subprocess.run(["docker", "start", NIX_SWE_CONTAINER_NAME], capture_output=True)
-        return True
-    
-    # Container doesn't exist - create it
-    result = subprocess.run(
-        ["docker", "run", "-d", "--name", NIX_SWE_CONTAINER_NAME, NIX_SWE_IMAGE, "sleep", "infinity"],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
-
-
-class MultiSweBenchDeployment(DockerDeployment):
-    """
-    Custom DockerDeployment that matches multi-swe-bench's approach.
-    This uses a shared nix container to provide Python to the task containers.
-    """
-    
-    def __init__(self, *, logger: logging.Logger | None = None, **kwargs):
-        super().__init__(logger=logger, **kwargs)
-
-    @classmethod
-    def from_config(
-        cls, logger: logging.Logger | None, config: DockerDeploymentConfig
-    ) -> "MultiSweBenchDeployment":
-        return cls(logger=logger, **config.model_dump())
-
-    def _get_swerex_start_cmd(self, prefix_cmd: str, token: str) -> list[str]:
-        """
-        Build the command to start swe-rex inside the container.
-        This patches swe-rex's local.py to preserve environment variables.
-        """
-        from swerex import PACKAGE_NAME, REMOTE_EXECUTABLE_NAME
-        
-        pipx_install = "/nix/swalm/nix-env/bin/python -m pip install pipx && /nix/swalm/nix-env/bin/python -m pipx ensurepath"
-        sed_cmd = 'sed -i \'s|env={"PS1": self._ps1, "PS2": "", "PS0": ""}|env=dict(os.environ.copy(), **{"PS1": self._ps1, "PS2": "", "PS0": ""})|\' /root/venv/lib/python3.11/site-packages/swerex/runtime/local.py'
-        sed_cmd1 = "sed -i '1i import os\n' /root/venv/lib/python3.11/site-packages/swerex/runtime/local.py"
-        rex_args = f"--auth-token {token}"
-        
-        if self._config.python_standalone_dir:
-            cmd = f"{prefix_cmd} && {sed_cmd} && {sed_cmd1} && {REMOTE_EXECUTABLE_NAME} {rex_args}"
-        else:
-            cmd = f"{prefix_cmd} && {sed_cmd} && {sed_cmd1} && {REMOTE_EXECUTABLE_NAME} {rex_args} || ({pipx_install} && pipx run {PACKAGE_NAME} {rex_args})"
-        
-        return ["/bin/sh", "-c", cmd]
-
-    async def start(self):
-        """Start the container with nix volume mounted."""
-        import time
-        import subprocess
-        
-        self._pull_image()
-        
-        if self._config.python_standalone_dir is not None:
-            image_id = self._build_image()
-        else:
-            image_id = self._config.image
-        
-        if self._config.port is None:
-            self._config.port = find_free_port()
-        
-        assert self._container_name is None
-        self._container_name = self._get_container_name()
-        token = self._get_token()
-        
-        platform_arg = []
-        if self._config.platform is not None:
-            platform_arg = ["--platform", self._config.platform]
-        
-        # Command to install swe-rex using nix Python
-        prefix_cmd = (
-            "/nix/swalm/nix-env/bin/python -m venv /root/venv && "
-            "/root/venv/bin/pip install --no-cache-dir swe-rex && "
-            "ln -s /root/venv/bin/swerex-remote /usr/local/bin/swerex-remote"
-        )
-        
-        cmds = [
-            "docker",
-            "run",
-            "--rm",
-            "--volumes-from",
-            NIX_SWE_CONTAINER_NAME,  # Mount volumes from nix container
-            "-p",
-            f"{self._config.port}:8000",
-            *platform_arg,
-            *self._config.docker_args,
-            "--name",
-            self._container_name,
-            image_id,
-            *self._get_swerex_start_cmd(prefix_cmd=prefix_cmd, token=token),
-        ]
-        
-        cmd_str = shlex.join(cmds)
-        self.logger.info(f"Starting container {self._container_name} with image {self._config.image} serving on port {self._config.port}")
-        self.logger.debug(f"Command: {cmd_str!r}")
-        
-        self._container_process = subprocess.Popen(
-            cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        
-        self.logger.info(f"Starting runtime at {self._config.port}")
-        self._runtime = RemoteRuntime.from_config(
-            RemoteRuntimeConfig(
-                host="localhost",
-                port=self._config.port, 
-                timeout=self._runtime_timeout, 
-                auth_token=token
-            )
-        )
-        
-        t0 = time.time()
-        await self._wait_until_alive(timeout=self._config.startup_timeout)
-        self.logger.info(f"Runtime started in {time.time() - t0:.2f}s")
-
-
-class SweRexSandbox:
-    """
-    Wrapper around swe-rex DockerDeployment for managing containers.
-    Uses the same nix container approach as multi-swe-bench.
+    Simple Docker sandbox using subprocess for container management.
+    This is a simpler approach similar to mini_swe_agent_bench that uses
+    direct docker commands instead of swe-rex HTTP communication.
     """
 
     def __init__(
         self,
         docker_image: str,
-        session_name: str = "main",
-        startup_timeout: int = 120,
+        timeout: int = 120,
         logger: logging.Logger | None = None,
     ):
         """
-        Initialize a swe-rex sandbox.
+        Initialize a Docker sandbox.
 
         Args:
             docker_image: Full Docker image name (e.g., "mswebench/pandas-dev_m_pandas:pr-12345")
-            session_name: Name for the bash session
-            startup_timeout: Timeout for container startup
+            timeout: Default command timeout in seconds
             logger: Logger instance
         """
         self.docker_image = docker_image
-        self.session_name = session_name
-        self.startup_timeout = startup_timeout
+        self.timeout = timeout
         self.logger = logger or logging.getLogger(__name__)
         
-        self._deployment: MultiSweBenchDeployment | None = None
-        self._runtime: RemoteRuntime | None = None
+        self._container_name: str | None = None
         self._started = False
 
-    async def start(self) -> None:
-        """Start the sandbox container using swe-rex with nix volume."""
+    def start(self) -> None:
+        """Start the Docker container."""
         if self._started:
             return
 
-        # Ensure nix container is running (provides Python)
-        if not ensure_nix_container_running():
-            raise SandboxError(
-                f"Failed to start nix container ({NIX_SWE_IMAGE}). "
-                f"Try running: docker pull {NIX_SWE_IMAGE}"
-            )
+        # Generate unique container name
+        self._container_name = f"multi-swe-{uuid.uuid4().hex[:12]}"
         
-        config = DockerDeploymentConfig(
-            image=self.docker_image,
-            port=None,  # Auto-assign port
-            startup_timeout=self.startup_timeout,
-            pull="never",  # Images should be pre-warmed
-            remove_container=True,  # Clean up on stop (--rm)
-            remove_images=False,  # Keep images for reuse
-            python_standalone_dir=None,  # We use nix container instead
-        )
-
-        self._deployment = MultiSweBenchDeployment.from_config(
-            logger=self.logger, config=config
-        )
+        # Start container in detached mode
+        cmd = [
+            "docker", "run",
+            "-d",  # Detached mode
+            "--name", self._container_name,
+            self.docker_image,
+            "sleep", "infinity",  # Keep container running
+        ]
         
-        self.logger.debug(f"Starting swe-rex container for {self.docker_image}")
-        await self._deployment.start()
+        self.logger.info(f"Starting container {self._container_name} with image {self.docker_image}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
         
-        self._runtime = self._deployment.runtime
-        
-        # Create a bash session for command execution
-        await self._runtime.create_session(
-            CreateBashSessionRequest(
-                session=self.session_name,
-                startup_source=["/root/.bashrc"],
-                startup_timeout=self.startup_timeout,
-            )
-        )
+        if result.returncode != 0:
+            raise SandboxError(f"Failed to start container: {result.stderr}")
         
         self._started = True
-        self.logger.debug(f"swe-rex container started: {self._deployment._container_name}")
+        self.logger.debug(f"Container {self._container_name} started successfully")
 
-    async def stop(self) -> None:
-        """Stop the sandbox container."""
-        if not self._started:
+    def stop(self) -> None:
+        """Stop and remove the Docker container."""
+        if not self._started or not self._container_name:
             return
 
         try:
-            if self._deployment:
-                await self._deployment.stop()
+            # Stop and remove container
+            subprocess.run(
+                ["docker", "rm", "-f", self._container_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.logger.debug(f"Container {self._container_name} stopped and removed")
         except Exception as e:
-            self.logger.warning(f"Error stopping swe-rex container: {e}")
+            self.logger.warning(f"Error stopping container {self._container_name}: {e}")
         finally:
-            self._deployment = None
-            self._runtime = None
+            self._container_name = None
             self._started = False
 
-    async def exec(
+    def exec(
         self,
         command: str,
         cwd: str | None = None,
-        timeout: int = 90,
+        timeout: int | None = None,
     ) -> tuple[int, str]:
         """
-        Execute a command in the sandbox.
+        Execute a command in the container using docker exec.
 
         Args:
             command: Command to execute
@@ -553,42 +386,64 @@ class SweRexSandbox:
         Returns:
             Tuple of (exit_code, output)
         """
-        if not self._started or not self._runtime:
+        if not self._started or not self._container_name:
             raise SandboxError("Sandbox not started")
+
+        timeout = timeout or self.timeout
 
         # Prepend cd if working directory specified
         if cwd:
-            command = f"cd {shlex.quote(cwd)} && {command}"
+            full_command = f"cd {shlex.quote(cwd)} && {command}"
+        else:
+            full_command = command
+
+        cmd = [
+            "docker", "exec",
+            self._container_name,
+            "/bin/bash", "-c", full_command,
+        ]
 
         try:
-            result = await self._runtime.run_in_session(
-                BashAction(
-                    session=self.session_name,
-                    command=command,
-                    timeout=timeout,
-                    set_last_action=True,
-                    check="silent",
-                )
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
-            return (result.exit_code, result.output)
-        except SweRexTimeoutError:
-            raise asyncio.TimeoutError(f"Command timed out after {timeout}s")
+            output = result.stdout + result.stderr
+            return result.returncode, output
+        except subprocess.TimeoutExpired:
+            return -1, f"Command timed out after {timeout}s"
+        except Exception as e:
+            return -1, f"Error executing command: {repr(e)}"
 
-    async def write_file(self, path: str, content: str) -> None:
-        """Write content to a file in the sandbox."""
-        if not self._started or not self._runtime:
-            raise SandboxError("Sandbox not started")
+    async def exec_async(
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        """
+        Async wrapper for exec using asyncio.to_thread.
+        """
+        return await asyncio.to_thread(self.exec, command, cwd, timeout)
 
-        await self._runtime.write_file(
-            WriteFileRequest(path=path, content=content)
+    def is_alive(self) -> bool:
+        """Check if the container is running."""
+        if not self._started or not self._container_name:
+            return False
+        
+        result = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"name={self._container_name}"],
+            capture_output=True,
+            text=True,
         )
+        return bool(result.stdout.strip())
 
     @property
     def container_name(self) -> str | None:
         """Get the container name."""
-        if self._deployment:
-            return self._deployment.container_name
-        return None
+        return self._container_name
 
 
 # ============================================================================
@@ -600,13 +455,13 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
     """
     Multi-SWE RL Environment with OpenHands agent harness.
 
-    Uses swe-rex for container management (same as Multi-SWE benchmark).
+    Uses simple Docker subprocess for container management (like mini_swe_agent_bench).
 
     Combines:
     - Multi-SWE dataset from PrimeIntellect/Multi-SWE-RL
     - Reward functions from mini_swe_agent_plus
     - OpenHands-style tools: execute_bash, str_replace_editor, finish
-    - swe-rex Docker sandbox infrastructure
+    - Simple Docker sandbox via subprocess
     """
 
     def __init__(
@@ -636,7 +491,7 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
         self.startup_timeout = startup_timeout
 
         # Track active sandboxes for cleanup
-        self.active_sandboxes: dict[str, SweRexSandbox] = {}
+        self.active_sandboxes: dict[str, DockerSandbox] = {}
 
         # Add OpenHands-style tools
         # Per MopenHands SWE-bench config: codeact_enable_jupyter=False, codeact_enable_llm_editor=False
@@ -666,7 +521,7 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
             raise SandboxError(f"Sandbox {sandbox_id} not found")
 
         try:
-            exit_code, output = await sandbox.exec(
+            exit_code, output = await sandbox.exec_async(
                 command=command,
                 cwd=working_dir,
                 timeout=timeout,
@@ -870,7 +725,7 @@ print(f"Successfully replaced in {{path}}")
         return "OBSERVATION:\n<<<FINISH>>>\nYour task has been completed. The changes will now be evaluated."
 
     # ========================================================================
-    # Sandbox Setup (using swe-rex)
+    # Sandbox Setup (using simple Docker subprocess)
     # ========================================================================
 
     async def setup_repo(self, sandbox_id: str, state: State):
@@ -902,38 +757,36 @@ print(f"Successfully replaced in {{path}}")
         )
 
     async def setup_state(self, state: State, **kwargs: Any) -> State:
-        """Create per-rollout sandbox using swe-rex."""
+        """Create per-rollout Docker sandbox."""
         docker_image = state["info"]["docker_image"]
-        self.logger.info(f"Setting up swe-rex sandbox for image: {docker_image}")
+        self.logger.info(f"Setting up Docker sandbox for image: {docker_image}")
 
-        # Create unique session ID
-        session_id = f"multi-swe-{uuid.uuid4().hex[:12]}"
         full_image = f"mswebench/{docker_image}".lower()
 
         try:
-            # Create and start swe-rex sandbox
-            sandbox = SweRexSandbox(
+            # Create and start Docker sandbox
+            sandbox = DockerSandbox(
                 docker_image=full_image,
-                session_name="main",
-                startup_timeout=self.startup_timeout,
+                timeout=self.startup_timeout,
                 logger=self.logger,
             )
 
-            self.logger.debug(f"Starting swe-rex sandbox {session_id}...")
-            await sandbox.start()
+            self.logger.debug(f"Starting Docker sandbox...")
+            # Start is sync, wrap in asyncio.to_thread
+            await asyncio.to_thread(sandbox.start)
 
             # Store sandbox reference using container name as ID
-            sandbox_id = sandbox.container_name or session_id
+            sandbox_id = sandbox.container_name
             self.active_sandboxes[sandbox_id] = sandbox
             state["sandbox_id"] = sandbox_id
 
             # Setup repository
             self.logger.debug(f"Setting up repository for sandbox {sandbox_id}...")
             await self.setup_repo(sandbox_id, state)
-            self.logger.debug(f"swe-rex sandbox {sandbox_id} is ready.")
+            self.logger.debug(f"Docker sandbox {sandbox_id} is ready.")
 
         except Exception as e:
-            self.logger.error(f"Error creating swe-rex sandbox:\n\n{repr(e)}")
+            self.logger.error(f"Error creating Docker sandbox:\n\n{repr(e)}")
             self.logger.error(traceback.format_exc())
             state["sandbox_id"] = None
             state["sandbox_error"] = 1
@@ -945,7 +798,8 @@ print(f"Successfully replaced in {{path}}")
         sandbox = self.active_sandboxes.pop(sandbox_id, None)
         if sandbox:
             try:
-                await sandbox.stop()
+                # Stop is sync, wrap in asyncio.to_thread
+                await asyncio.to_thread(sandbox.stop)
             except Exception as e:
                 self.logger.warning(f"Error destroying sandbox {sandbox_id}: {repr(e)}")
 
@@ -1067,7 +921,7 @@ print(f"Successfully replaced in {{path}}")
         if not sandbox:
             raise SandboxError(f"Sandbox {sandbox_id} not found")
 
-        # Upload create_fix_patch script using swe-rex
+        # Upload create_fix_patch script
         await sandbox.write_file("/home/create_fix_patch.sh", CREATE_FIX_PATCH_SCRIPT)
 
         # Run create_fix_patch script
@@ -1245,7 +1099,7 @@ def load_environment(
     """
     Load the Multi-SWE environment with OpenHands agent harness.
 
-    Uses swe-rex for container management (same as Multi-SWE benchmark).
+    Uses simple Docker subprocess for container management (like mini_swe_agent_bench).
 
     Args:
         dataset_name: The dataset to use. Default is PrimeIntellect/Multi-SWE-RL.
