@@ -470,10 +470,10 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
         rubric: vf.Rubric,
         system_prompt: str = SYSTEM_PROMPT,
         max_turns: int = 200,
-        turn_timeout: int = 90,
-        test_timeout: int = 1800,
-        total_timeout_minutes: int = 120,
-        startup_timeout: int = 120,
+        turn_timeout: int = 90,  # Per-command timeout (matches deepswe)
+        test_timeout: int = 300,  # Test execution timeout (matches deepswe/mini_swe_agent_bench)
+        total_timeout_minutes: int = 120,  # Total episode timeout (matches deepswe)
+        startup_timeout: int = 60,  # Container startup timeout
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -910,7 +910,7 @@ print(f"Successfully replaced in {{path}}")
     # Test Execution
     # ========================================================================
 
-    async def run_tests(self, state: State, test_timeout: int = 1800) -> str:
+    async def run_tests(self, state: State, test_timeout: int = 300) -> str:
         """Run tests for Multi-SWE harness."""
         info = restore_row(state["info"])
         instance_id = info["instance_id"]
@@ -1092,8 +1092,8 @@ def load_environment(
     dataset_name: Literal["PrimeIntellect/Multi-SWE-RL"] = "PrimeIntellect/Multi-SWE-RL",
     max_turns: int = 200,
     total_timeout_minutes: int = 120,
-    test_timeout: int = 1800,
-    startup_timeout: int = 300,  # 5 min to allow pip install with concurrent containers
+    test_timeout: int = 300,  # 5 min - matches deepswe/mini_swe_agent_bench
+    startup_timeout: int = 60,  # Container startup timeout
     **kwargs: Any,
 ) -> vf.Environment:
     """
@@ -1101,11 +1101,15 @@ def load_environment(
 
     Uses simple Docker subprocess for container management (like mini_swe_agent_bench).
 
+    Timeout values aligned with reference environments:
+    - deepswe: turn_timeout=90, test_timeout=300, total_timeout_minutes=120
+    - mini_swe_agent_bench: timeout=60, validation_timeout=300
+
     Args:
         dataset_name: The dataset to use. Default is PrimeIntellect/Multi-SWE-RL.
         max_turns: Maximum number of turns per episode.
         total_timeout_minutes: Total timeout for the episode in minutes.
-        test_timeout: Timeout for running tests in seconds.
+        test_timeout: Timeout for running tests in seconds (300s = 5 min).
         startup_timeout: Timeout for container startup in seconds.
         **kwargs: Additional arguments passed to the environment.
 
