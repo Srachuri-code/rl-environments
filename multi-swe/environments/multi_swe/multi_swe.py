@@ -470,9 +470,9 @@ class MultiSWEOpenHandsEnv(vf.StatefulToolEnv):
         rubric: vf.Rubric,
         system_prompt: str = SYSTEM_PROMPT,
         max_turns: int = 200,
-        turn_timeout: int = 90,  # Per-command timeout (matches deepswe)
-        test_timeout: int = 300,  # Test execution timeout (matches deepswe/mini_swe_agent_bench)
-        total_timeout_minutes: int = 120,  # Total episode timeout (matches deepswe)
+        turn_timeout: int = 600,  # Per-command timeout: 10 min for C/C++ compilation (make -j)
+        test_timeout: int = 1800,  # Test timeout: 30 min (matches SWE-bench default for compiled langs)
+        total_timeout_minutes: int = 120,  # Total episode timeout
         startup_timeout: int = 60,  # Container startup timeout
         **kwargs: Any,
     ) -> None:
@@ -910,7 +910,7 @@ print(f"Successfully replaced in {{path}}")
     # Test Execution
     # ========================================================================
 
-    async def run_tests(self, state: State, test_timeout: int = 300) -> str:
+    async def run_tests(self, state: State, test_timeout: int = 1800) -> str:
         """Run tests for Multi-SWE harness."""
         info = restore_row(state["info"])
         instance_id = info["instance_id"]
@@ -1092,7 +1092,8 @@ def load_environment(
     dataset_name: Literal["PrimeIntellect/Multi-SWE-RL"] = "PrimeIntellect/Multi-SWE-RL",
     max_turns: int = 200,
     total_timeout_minutes: int = 120,
-    test_timeout: int = 300,  # 5 min - matches deepswe/mini_swe_agent_bench
+    test_timeout: int = 1800,  # 30 min - matches SWE-bench default for compiled languages
+    turn_timeout: int = 600,  # 10 min - for C/C++ compilation commands (make -j)
     startup_timeout: int = 60,  # Container startup timeout
     **kwargs: Any,
 ) -> vf.Environment:
@@ -1101,15 +1102,20 @@ def load_environment(
 
     Uses simple Docker subprocess for container management (like mini_swe_agent_bench).
 
-    Timeout values aligned with reference environments:
-    - deepswe: turn_timeout=90, test_timeout=300, total_timeout_minutes=120
-    - mini_swe_agent_bench: timeout=60, validation_timeout=300
+    Timeout values for Multi-SWE-bench (multilingual with compiled languages):
+    - test_timeout: 1800s (30 min) - matches SWE-bench default, needed for C/C++/Rust/Go
+    - turn_timeout: 600s (10 min) - for compilation commands like 'make -j'
+    - total_timeout_minutes: 120 min - total episode limit
+
+    Note: These are higher than Python-only benchmarks (deepswe/mini_swe_agent_bench)
+    because Multi-SWE includes C, C++, Rust, Go, Java which require compilation.
 
     Args:
         dataset_name: The dataset to use. Default is PrimeIntellect/Multi-SWE-RL.
         max_turns: Maximum number of turns per episode.
         total_timeout_minutes: Total timeout for the episode in minutes.
-        test_timeout: Timeout for running tests in seconds (300s = 5 min).
+        test_timeout: Timeout for running tests in seconds (1800s = 30 min).
+        turn_timeout: Timeout for each command/tool call in seconds (600s = 10 min).
         startup_timeout: Timeout for container startup in seconds.
         **kwargs: Additional arguments passed to the environment.
 
@@ -1165,6 +1171,7 @@ def load_environment(
         rubric=rubric,
         system_prompt=SYSTEM_PROMPT,
         max_turns=max_turns,
+        turn_timeout=turn_timeout,
         test_timeout=test_timeout,
         total_timeout_minutes=total_timeout_minutes,
         startup_timeout=startup_timeout,
