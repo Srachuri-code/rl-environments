@@ -54,17 +54,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TOOLATHLON_HOME=/toolathlon
 ENV PATH="/root/.local/bin:$PATH"
 
-# Install system dependencies
+# Install system dependencies + Python 3.12 from deadsnakes PPA
 RUN apt-get update && apt-get install -y \
     curl \
     git \
-    python3.12 \
-    python3.12-venv \
-    python3.12-dev \
-    python3-pip \
+    software-properties-common \
     nodejs \
     npm \
     build-essential \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv package manager
