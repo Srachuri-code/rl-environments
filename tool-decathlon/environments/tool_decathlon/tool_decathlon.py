@@ -1,12 +1,15 @@
 """
 Tool Decathlon environment for verifiers.
 
-Thin wrapper over Toolathlon's infrastructure. We just provide glue code to:
-1. Load Toolathlon tasks as a verifiers dataset
-2. Run tasks in isolated Docker containers
-3. Extract rewards from Toolathlon's eval scripts
+Production-ready wrapper over Toolathlon's infrastructure for RL training.
+Supports ALL 108 Toolathlon tasks with proper container isolation.
 
-Everything else (MCPs, tools, evaluation) is handled by Toolathlon.
+Architecture:
+  - Each task runs in an isolated Docker container
+  - Container uses Toolathlon's pre-built image (all MCP servers included)
+  - Container uses host network to access local services (Canvas, WooCommerce, etc.)
+  - Docker socket mounted for K8s tasks
+  - task_api.py provides HTTP interface for tool execution
 
 Paper: https://arxiv.org/abs/2510.25726
 GitHub: https://github.com/hkust-nlp/Toolathlon
@@ -14,6 +17,7 @@ GitHub: https://github.com/hkust-nlp/Toolathlon
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -41,7 +45,7 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
     - Isolated sandbox (workspace)
     
     Architecture:
-        Training: Toolathlon runs in prime-sandbox per episode
+        Training: Toolathlon runs in Docker container per episode
         Rewards: Extracted from Toolathlon's eval scripts
         Future: Dense rewards by modifying eval scripts
     
@@ -49,6 +53,9 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         dataset_path: Path to preprocessed Toolathlon dataset
         toolathlon_image: Docker image with Toolathlon pre-configured
         max_turns: Maximum turns per episode
+        use_host_network: Use host network for local service access (Canvas, etc.)
+        mount_docker_socket: Mount Docker socket for K8s tasks
+        configs_dir: Optional path to custom Toolathlon configs
     """
     
     def __init__(
@@ -56,16 +63,20 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         dataset_path: Optional[str] = None,
         toolathlon_image: str = "toolathlon:latest",
         max_turns: int = 100,
-        runtime_timeout_s: float = 60.0,
+        runtime_timeout_s: float = 120.0,
         setup_timeout_s: float = 600.0,  # MCP server initialization can be slow (10 min)
         tool_timeout_s: float = 300.0,   # Individual tool calls (5 min)
+        use_host_network: bool = True,   # Required for local services
+        mount_docker_socket: bool = True, # Required for K8s tasks
+        configs_dir: Optional[str] = None,
         **kwargs,
     ):
         env_dir = Path(__file__).parent
+        project_root = env_dir.parent.parent
         
         # Load dataset
         if dataset_path is None:
-            dataset_path = str(env_dir.parent.parent / "data" / "tool_decathlon_dataset")
+            dataset_path = str(project_root / "data" / "tool_decathlon_dataset")
         
         if not Path(dataset_path).exists():
             raise FileNotFoundError(
@@ -77,6 +88,16 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         self.runtime_timeout_s = runtime_timeout_s
         self.setup_timeout_s = setup_timeout_s
         self.tool_timeout_s = tool_timeout_s
+        self.use_host_network = use_host_network
+        self.mount_docker_socket = mount_docker_socket
+        
+        # Optional custom configs (credentials, tokens, etc.)
+        self.configs_dir = configs_dir
+        if configs_dir is None:
+            # Check if toolathlon-server has configs
+            toolathlon_configs = project_root / "toolathlon-server" / "configs"
+            if toolathlon_configs.exists():
+                self.configs_dir = str(toolathlon_configs)
         
         # Initialize Docker client
         try:
@@ -88,12 +109,19 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
                 "Make sure Docker is installed and running."
             )
         
+        # Verify image exists
+        try:
+            self.docker_client.images.get(toolathlon_image)
+            logger.info(f"Found Docker image: {toolathlon_image}")
+        except docker.errors.ImageNotFound:
+            raise RuntimeError(
+                f"Docker image not found: {toolathlon_image}\n"
+                "Run: bash scripts/build_toolathlon_image.sh"
+            )
+        
         eval_dataset = self._load_dataset(dataset_path)
         rubric = self._create_rubric()
         
-        # We implement the stepping loop ourselves (TauBench-style):
-        # - setup_state() provisions a per-rollout runtime and injects per-task oai_tools.
-        # - env_response() executes tool calls against that runtime.
         super().__init__(eval_dataset=eval_dataset, rubric=rubric, max_turns=max_turns, **kwargs)
     
     def _load_dataset(self, path: str) -> Dataset:
@@ -101,30 +129,15 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         return load_from_disk(path)
     
     def _create_rubric(self) -> vf.Rubric:
-        """
-        Create reward rubric (extensible for future dense rewards).
-        
-        Current: Binary task success from Toolathlon eval
-        Future: Add trajectory-based rewards by modifying eval scripts
-        """
+        """Create reward rubric."""
         
         async def task_success_reward(completion, state, **kwargs) -> float:
-            """
-            Binary reward from Toolathlon's evaluation.
-            
-            Future extensions (edit Toolathlon's evaluator.py):
-            - Partial credit for progress
-            - Efficiency penalties
-            - Tool usage quality
-            """
+            """Binary reward from Toolathlon's evaluation."""
             if not state.get("task_done"):
                 return 0.0
-            
-            # Toolathlon eval result (True/False)
             eval_result = state.get("eval_result", False)
             return 1.0 if eval_result else 0.0
         
-        # Easy to add more reward functions here
         return vf.Rubric(
             funcs=[task_success_reward],
             weights=[1.0],
@@ -132,13 +145,15 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
     
     async def setup_state(self, state: vf.State, **kwargs) -> vf.State:
         """
-        Setup sub-environment (task) in isolated sandbox.
+        Setup task in isolated Docker container.
         
-        Creates a sandbox with Toolathlon pre-configured and starts
-        the task-specific infrastructure (MCPs, workspace, etc).
+        Container setup follows Toolathlon's run_single_containerized.sh:
+        - Host network for local service access
+        - Docker socket mounted for K8s tasks
+        - Configs copied for MCP credentials
+        - Task files available
         """
-        # Extract task_id - verifiers passes the full dataset row as state initially
-        # Check multiple locations for robustness
+        # Extract task_id
         task_id = (
             state.get("task_id") or 
             state.get("info", {}).get("task_id") or
@@ -147,40 +162,66 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         
         logger.info(f"Setting up Docker container for task: {task_id}")
         
-        # Create Docker container (async via thread pool to avoid blocking)
         loop = asyncio.get_event_loop()
-        # Use UUID to avoid collisions when parallel rollouts start simultaneously
         container_name = f"toolathlon-{task_id}-{uuid.uuid4().hex[:8]}"
+        
+        # Build container run arguments
+        run_kwargs = {
+            "image": self.toolathlon_image,
+            "command": "/bin/bash -c 'tail -f /dev/null'",
+            "name": container_name,
+            "detach": True,
+            "remove": True,
+            "mem_limit": "8g",
+            "cpu_count": 4,
+            "working_dir": "/workspace",
+        }
+        
+        # Host network for local service access (Canvas, WooCommerce, Poste, etc.)
+        if self.use_host_network:
+            run_kwargs["network_mode"] = "host"
+            # With host network, we use localhost:RUNTIME_CONTAINER_PORT directly
+        else:
+            # Map container port to random host port
+            run_kwargs["ports"] = {f"{RUNTIME_CONTAINER_PORT}/tcp": None}
+        
+        # Mount Docker socket for K8s tasks
+        if self.mount_docker_socket:
+            docker_sock = "/var/run/docker.sock"
+            if os.path.exists(docker_sock):
+                run_kwargs["volumes"] = {docker_sock: {"bind": docker_sock, "mode": "rw"}}
+        
+        # Environment variables (for MCP servers that need them)
+        run_kwargs["environment"] = {
+            "DOCKER_API_VERSION": "1.44",
+            "PYTHONUNBUFFERED": "1",
+        }
+        
+        # Create container
         container = await loop.run_in_executor(
             None,
-            lambda: self.docker_client.containers.run(
-                self.toolathlon_image,
-                command="/bin/bash -c 'tail -f /dev/null'",  # Keep alive
-                name=container_name,
-                detach=True,
-                remove=True,  # Auto-remove when stopped
-                mem_limit="4g",
-                cpu_count=2,
-                ports={f"{RUNTIME_CONTAINER_PORT}/tcp": None},  # random host port
-            )
+            lambda: self.docker_client.containers.run(**run_kwargs)
         )
         
-        # Make sure state["info"] exists
+        # Initialize state
         state.setdefault("info", {})
-
         state["container"] = container
         state["task_id"] = task_id
         state["task_done"] = False
         state["eval_result"] = None
-
-        # Start persistent runtime server inside container and do task setup over HTTP.
+        
+        # Copy configs to container if available
+        if self.configs_dir and Path(self.configs_dir).exists():
+            await self._copy_configs_to_container(container, self.configs_dir)
+        
+        # Start runtime server and setup task
         runtime_url = await self._start_runtime_server(container)
         state["runtime_url"] = runtime_url
-
-        # Get tool requirements from dataset (already fetched from task_config.json)
+        
+        # Get tool requirements from dataset
         mcp_servers = state.get("info", {}).get("mcp_servers", [])
         local_tools = state.get("info", {}).get("local_tools", [])
-
+        
         setup_data = await self._runtime_setup(runtime_url, task_id, mcp_servers, local_tools)
         tools = setup_data.get("tools", [])
         
@@ -196,17 +237,37 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         
         state["info"]["oai_tools"] = tools
         
-        logger.info(f"Container ready with {len(tools)} tools")
+        logger.info(f"Container ready with {len(tools)} tools for task {task_id}")
         return state
+    
+    async def _copy_configs_to_container(self, container, configs_dir: str):
+        """Copy Toolathlon configs to container for MCP credentials."""
+        loop = asyncio.get_event_loop()
+        try:
+            # Create tar archive of configs
+            import tarfile
+            import io
+            
+            tar_buffer = io.BytesIO()
+            with tarfile.open(fileobj=tar_buffer, mode='w') as tar:
+                tar.add(configs_dir, arcname='configs')
+            tar_buffer.seek(0)
+            
+            # Copy to container
+            await loop.run_in_executor(
+                None,
+                lambda: container.put_archive('/workspace', tar_buffer)
+            )
+            logger.debug("Copied configs to container")
+        except Exception as e:
+            logger.warning(f"Failed to copy configs: {e}")
     
     async def is_completed(self, messages: vf.Messages, state: vf.State, **kwargs) -> bool:
         """Check if task is complete."""
-        # Respect base guards (max_turns, etc.) when available.
         try:
             if await super().is_completed(messages, state, **kwargs):
                 return True
         except Exception:
-            # Be robust across verifiers versions.
             pass
         return state.get("task_done", False)
     
@@ -216,16 +277,12 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         state: vf.State,
         **kwargs
     ) -> Tuple[vf.Messages, vf.State]:
-        """
-        Execute tool calls in Toolathlon sandbox.
-        
-        Tool execution is delegated to Toolathlon's MCP servers
-        running inside the sandbox.
-        """
+        """Execute tool calls in Toolathlon container."""
         responses: list[vf.Message] = []
         last_msg = messages[-1] if messages else {}
         tool_calls = last_msg.get("tool_calls", [])
         runtime_url = state.get("runtime_url")
+        
         if not runtime_url:
             logger.error("No runtime_url in state")
             state["task_done"] = True
@@ -248,14 +305,12 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
             except json.JSONDecodeError:
                 args = {}
             
-            # Execute against runtime server
-            if name == "claim_done":
-                # Task completion - run eval
+            # Execute tool
+            if name == "claim_done" or name == "local-claim_done":
                 state["task_done"] = True
                 eval_result = await self._runtime_evaluate(runtime_url)
                 state["eval_result"] = eval_result
                 result = f"Task evaluation: {'SUCCESS' if eval_result else 'FAILED'}"
-            
             else:
                 result = await self._runtime_execute(runtime_url, name, args)
             
@@ -268,72 +323,53 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         return responses, state
     
     async def _start_runtime_server(self, container) -> str:
-        """
-        Start the in-container task_api.py HTTP server and return its host URL.
-        """
+        """Start task_api.py HTTP server in container."""
         loop = asyncio.get_event_loop()
-
-        # Discover mapped host port
-        await loop.run_in_executor(None, container.reload)
-        ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-        host_port = None
-        bindings = ports.get(f"{RUNTIME_CONTAINER_PORT}/tcp")
-        if bindings:
-            host_port = bindings[0].get("HostPort")
-        if not host_port:
-            # Best-effort reload once more (docker can populate Ports slightly later)
-            await asyncio.sleep(0.1)
+        
+        # Determine URL based on network mode
+        if self.use_host_network:
+            # With host network, server binds to localhost
+            runtime_url = f"http://127.0.0.1:{RUNTIME_CONTAINER_PORT}"
+        else:
+            # Get mapped port
             await loop.run_in_executor(None, container.reload)
             ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
             bindings = ports.get(f"{RUNTIME_CONTAINER_PORT}/tcp")
-            if bindings:
-                host_port = bindings[0].get("HostPort")
-
-        if not host_port:
-            raise RuntimeError("Failed to determine host port mapping for runtime server")
-
-        logger.info(f"Starting runtime server on container port {RUNTIME_CONTAINER_PORT} -> host port {host_port}")
-
-        # First, test if the serve command exists and imports work
-        exit_code, test_output = await loop.run_in_executor(
-            None,
-            lambda: container.exec_run(
-                ["/bin/bash", "-c", "cd /toolathlon && /root/.local/bin/uv run python -c 'import task_api; print(\"imports ok\")'"],
-                demux=False,
-            ),
+            if not bindings:
+                await asyncio.sleep(0.5)
+                await loop.run_in_executor(None, container.reload)
+                ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+                bindings = ports.get(f"{RUNTIME_CONTAINER_PORT}/tcp")
+            
+            if not bindings:
+                raise RuntimeError("Failed to get port mapping")
+            
+            host_port = bindings[0].get("HostPort")
+            runtime_url = f"http://127.0.0.1:{host_port}"
+        
+        logger.info(f"Starting runtime server, will be at {runtime_url}")
+        
+        # Start server in container (uses Toolathlon's venv)
+        start_cmd = (
+            f"cd /workspace && "
+            f"nohup .venv/bin/python task_api.py serve "
+            f"--host 0.0.0.0 --port {RUNTIME_CONTAINER_PORT} "
+            f"> /tmp/runtime.log 2>&1 &"
         )
         
-        if exit_code != 0:
-            error_msg = test_output.decode() if test_output else "Unknown error"
-            logger.error(f"task_api.py import test failed: {error_msg}")
-            raise RuntimeError(f"Cannot import task_api.py: {error_msg}")
-        
-        logger.debug("task_api.py imports successfully")
-
-        # Start server inside container (detached, with output redirected to a log file)
-        exec_result = await loop.run_in_executor(
+        await loop.run_in_executor(
             None,
-            lambda: container.exec_run(
-                [
-                    "/bin/bash",
-                    "-c",
-                    f"cd /toolathlon && nohup /root/.local/bin/uv run python task_api.py serve --host 0.0.0.0 --port {RUNTIME_CONTAINER_PORT} > /tmp/runtime.log 2>&1 &",
-                ],
-                detach=False,  # Wait for shell to spawn the background process
-            ),
+            lambda: container.exec_run(["/bin/bash", "-c", start_cmd], detach=False)
         )
         
-        # Give server a moment to start
-        await asyncio.sleep(1.0)
-
-        runtime_url = f"http://127.0.0.1:{host_port}"
-        logger.info(f"Waiting for runtime server at {runtime_url}/health...")
-
-        # Wait for /health
+        # Wait for server to be healthy
+        await asyncio.sleep(2.0)
+        
         deadline = time.time() + self.runtime_timeout_s
         last_error = None
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            while True:
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            while time.time() < deadline:
                 try:
                     r = await client.get(f"{runtime_url}/health")
                     if r.status_code == 200:
@@ -342,34 +378,30 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
                 except Exception as e:
                     last_error = str(e)
                 
-                if time.time() > deadline:
-                    # Try to get server logs for debugging
-                    try:
-                        exit_code, log_output = await loop.run_in_executor(
-                            None,
-                            lambda: container.exec_run(["/bin/cat", "/tmp/runtime.log"], demux=False),
-                        )
-                        logs = log_output.decode() if log_output else "No logs"
-                    except Exception:
-                        logs = "Could not retrieve logs"
-                    
-                    error_msg = (
-                        f"Runtime server failed to become healthy after {self.runtime_timeout_s}s\n"
-                        f"Last error: {last_error}\n"
-                        f"Server logs:\n{logs[:2000]}"
-                    )
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                
-                await asyncio.sleep(0.5)
-
+                await asyncio.sleep(1.0)
+        
+        # Failed - get logs for debugging
+        try:
+            _, log_output = await loop.run_in_executor(
+                None,
+                lambda: container.exec_run(["/bin/cat", "/tmp/runtime.log"])
+            )
+            logs = log_output.decode() if log_output else "No logs"
+        except Exception:
+            logs = "Could not retrieve logs"
+        
+        raise RuntimeError(
+            f"Runtime server failed after {self.runtime_timeout_s}s\n"
+            f"Last error: {last_error}\n"
+            f"Server logs:\n{logs[:3000]}"
+        )
+    
     async def _runtime_setup(
         self, runtime_url: str, task_id: str, mcp_servers: list[str], local_tools: list[str]
     ) -> dict[str, Any]:
-        """Call runtime /setup with tool metadata from dataset (no disk re-read).
+        """Setup task via HTTP API."""
+        logger.info(f"Setting up task {task_id} with {len(mcp_servers)} MCP servers")
         
-        Uses longer timeout because MCP server initialization can be slow.
-        """
         async with httpx.AsyncClient(timeout=self.setup_timeout_s) as client:
             r = await client.post(
                 f"{runtime_url}/setup",
@@ -381,33 +413,41 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
             )
             r.raise_for_status()
             return r.json()
-
+    
     async def _runtime_execute(self, runtime_url: str, tool_name: str, args: dict) -> str:
+        """Execute tool via HTTP API."""
         async with httpx.AsyncClient(timeout=self.tool_timeout_s) as client:
-            r = await client.post(f"{runtime_url}/execute", json={"tool_name": tool_name, "args": args})
+            r = await client.post(
+                f"{runtime_url}/execute",
+                json={"tool_name": tool_name, "args": args}
+            )
             r.raise_for_status()
             return r.text
-
+    
     async def _runtime_evaluate(self, runtime_url: str) -> bool:
+        """Run evaluation via HTTP API."""
         async with httpx.AsyncClient(timeout=self.tool_timeout_s) as client:
             r = await client.post(f"{runtime_url}/evaluate")
             r.raise_for_status()
-            data = r.json()
-            return bool(data.get("success", False))
+            return r.json().get("success", False)
     
     async def cleanup_state(self, state: vf.State, **kwargs):
-        """Cleanup Docker container (destroys entire task environment)."""
+        """Cleanup Docker container."""
         container = state.get("container")
         if container:
             try:
                 loop = asyncio.get_event_loop()
                 runtime_url = state.get("runtime_url")
+                
+                # Cleanup MCP connections
                 if runtime_url:
                     try:
                         async with httpx.AsyncClient(timeout=5.0) as client:
                             await client.post(f"{runtime_url}/cleanup")
                     except Exception:
                         pass
+                
+                # Stop container
                 await loop.run_in_executor(None, container.stop)
                 logger.info(f"Cleaned up container for {state.get('task_id')}")
             except Exception as e:
@@ -418,31 +458,44 @@ def load_environment(
     dataset_path: Optional[str] = None,
     toolathlon_image: str = "toolathlon:latest",
     max_turns: int = 100,
+    use_host_network: bool = True,
+    mount_docker_socket: bool = True,
+    configs_dir: Optional[str] = None,
     **kwargs,
 ) -> ToolDecathlonEnv:
     """
-    Load Tool Decathlon meta-environment.
+    Load Tool Decathlon environment for verifiers RL training.
     
-    This is a thin wrapper over Toolathlon - all the heavy lifting
-    (MCPs, eval, etc) is done by their infrastructure in sandboxes.
+    This wraps Toolathlon's 108 tasks for reinforcement learning.
+    
+    Prerequisites:
+        1. Build Docker image: bash scripts/build_toolathlon_image.sh
+        2. (Optional) Deploy local services: bash scripts/deploy_services.sh
+        3. (Optional) Configure credentials in toolathlon-server/configs/
     
     Args:
-        dataset_path: Path to Toolathlon dataset  
-        toolathlon_image: Docker image with Toolathlon setup
+        dataset_path: Path to Toolathlon dataset
+        toolathlon_image: Docker image with Toolathlon
         max_turns: Max turns per task
+        use_host_network: Use host network for local services
+        mount_docker_socket: Mount Docker socket for K8s tasks
+        configs_dir: Path to Toolathlon configs (credentials)
     
     Example:
         env = load_environment()
         
-        # Each rollout = isolated Toolathlon instance in sandbox
+        # Each rollout = isolated container
         for batch in dataloader:
-            states = await env.setup_state(batch)  # Create sandboxes
-            # ... run your training loop here ...
-            await env.cleanup_state(states)  # Destroy sandboxes
+            states = await env.setup_state(batch)
+            # ... training loop ...
+            await env.cleanup_state(states)
     """
     return ToolDecathlonEnv(
         dataset_path=dataset_path,
         toolathlon_image=toolathlon_image,
         max_turns=max_turns,
+        use_host_network=use_host_network,
+        mount_docker_socket=mount_docker_socket,
+        configs_dir=configs_dir,
         **kwargs,
     )

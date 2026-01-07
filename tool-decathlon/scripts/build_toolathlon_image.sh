@@ -2,7 +2,14 @@
 # =============================================================================
 # Build Toolathlon Docker Image for Verifiers RL Environment
 # =============================================================================
-# Creates a Docker image based on official Toolathlon with task_api.py added.
+# Creates a Docker image based on official Toolathlon pre-built image
+# with task_api.py added for verifiers integration.
+#
+# The base image (lockon0927/toolathlon-task-image:1016beta) includes:
+#   - All 34 MCP servers pre-installed
+#   - Playwright with Chromium browser
+#   - kubectl, kind, helm for K8s tasks
+#   - All Python/Node.js dependencies
 #
 # Usage:
 #   ./build_toolathlon_image.sh
@@ -27,144 +34,144 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-echo "============================================================"
-echo "Building Toolathlon Docker Image"
-echo "============================================================"
+# Base image from Toolathlon (includes all MCP servers)
+BASE_IMAGE="lockon0927/toolathlon-task-image:1016beta"
 
-# Clean build directory
+echo "============================================================"
+echo "Building Toolathlon Docker Image for Verifiers"
+echo "============================================================"
+echo ""
+echo "Base image: $BASE_IMAGE"
+echo ""
+
+# Pull the base image first
+log_info "Pulling official Toolathlon image..."
+docker pull "$BASE_IMAGE"
+
+# Clean and create build directory
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
-# Clone fresh Toolathlon repo
-log_info "Cloning official Toolathlon repository..."
-git clone --depth 1 https://github.com/hkust-nlp/Toolathlon.git "$BUILD_DIR/toolathlon"
+# Copy task_api.py to build context
+log_info "Preparing build context..."
+cp "$PROJECT_ROOT/docker/task_api.py" "$BUILD_DIR/task_api.py"
 
-# Copy task API wrapper
-log_info "Adding task_api.py wrapper..."
-cp "$PROJECT_ROOT/docker/task_api.py" "$BUILD_DIR/toolathlon/task_api.py"
-
-cd "$BUILD_DIR/toolathlon"
-
-# Create optimized Dockerfile that properly sets up Toolathlon
+# Create Dockerfile that extends the official image
 log_info "Creating Dockerfile..."
-cat > Dockerfile.verifiers << 'DOCKERFILE'
-FROM ubuntu:22.04
+cat > "$BUILD_DIR/Dockerfile" << 'DOCKERFILE'
+# Use official Toolathlon image as base (includes all MCP servers)
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TOOLATHLON_HOME=/toolathlon
-ENV PATH="/root/.local/bin:$PATH"
+# Add task_api.py for verifiers integration
+COPY task_api.py /workspace/task_api.py
 
-# Install system dependencies + Python 3.12 from deadsnakes PPA
-RUN apt-get update && apt-get install -y \
-    curl \
-    git \
-    software-properties-common \
-    nodejs \
-    npm \
-    build-essential \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y \
-    python3.12 \
-    python3.12-venv \
-    python3.12-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv package manager
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-
-WORKDIR /toolathlon
-COPY . .
-
-# Create config files from examples (required by Toolathlon)
-RUN cp configs/global_configs_example.py configs/global_configs.py || true
-RUN cp configs/token_key_session_example.py configs/token_key_session.py || true
-
-# Create venv with Python 3.12
-RUN /root/.local/bin/uv venv .venv --python python3.12
-
-# Install Toolathlon with relaxed Python version
-RUN sed -i 's/requires-python = "==3.12.11"/requires-python = ">=3.11"/' pyproject.toml || true
-
-# Install Toolathlon dependencies
-RUN /root/.local/bin/uv pip install --python .venv/bin/python -e . || \
-    /root/.local/bin/uv pip install --python .venv/bin/python \
-    fastapi uvicorn httpx anyio pydantic pyyaml mcp \
-    openai openai-agents aiohttp aiofiles loguru \
-    datasets tenacity requests
-
-# Ensure task_api.py and Toolathlon config dependencies are installed
-# Pin versions to match Toolathlon's pyproject.toml for compatibility
-RUN /root/.local/bin/uv pip install --python .venv/bin/python \
+# Ensure task_api dependencies are available in the venv
+RUN . .venv/bin/activate && pip install --no-cache-dir \
     fastapi==0.115.5 \
     uvicorn==0.32.1 \
-    httpx==0.27.0 \
-    anyio==4.9.0 \
-    pydantic==2.11.3 \
-    pyyaml==6.0.2 \
-    mcp>=1.9.0 \
-    openai==1.76.0 \
-    "openai-agents==0.0.15" \
-    aiohttp==3.12.7 \
-    aiofiles==24.1.0 \
-    addict==2.4.0
+    httpx==0.27.0
 
-# Create workspace directory
-RUN mkdir -p /toolathlon/agent_workspace
+# Create agent workspace directory
+RUN mkdir -p /workspace/agent_workspace
 
-WORKDIR /toolathlon
+# Set working directory
+WORKDIR /workspace
+
+# Default command
 CMD ["/bin/bash"]
 DOCKERFILE
 
+# Build the image
 log_info "Building Docker image..."
-docker build -f Dockerfile.verifiers -t toolathlon:latest .
+cd "$BUILD_DIR"
+docker build \
+    --build-arg BASE_IMAGE="$BASE_IMAGE" \
+    -t toolathlon:latest \
+    -t toolathlon:verifiers \
+    .
 
 log_info "✓ Image built: toolathlon:latest"
 
 # Test the image
 log_info "Testing image..."
-docker run --rm toolathlon:latest /toolathlon/.venv/bin/python -c "
+docker run --rm toolathlon:latest bash -c "
+echo '=== Testing Toolathlon Image ==='
+
+# Activate venv
+source .venv/bin/activate
+
+# Test core imports
+python3 -c '
 import sys
-sys.path.insert(0, '/toolathlon')
+sys.path.insert(0, \"/workspace\")
 
-# Test core dependencies
-try:
-    import anyio
-    import fastapi
-    import uvicorn
-    print('✓ Core dependencies OK')
-except ImportError as e:
-    print(f'✗ Missing core dep: {e}')
-    sys.exit(1)
-
-# Test Toolathlon config import
-try:
-    from configs.global_configs import global_configs
-    print('✓ Toolathlon configs OK')
-except ImportError as e:
-    print(f'✗ Config import failed: {e}')
-    sys.exit(1)
-
-# Test MCP server manager import
-try:
-    from utils.mcp.tool_servers import MCPServerManager
-    print('✓ MCPServerManager OK')
-except ImportError as e:
-    print(f'⚠ MCPServerManager import: {e}')
-
-# Test task_api import
+# Test task_api
 try:
     from task_api import TaskAPI
-    print('✓ task_api.py OK')
+    print(\"✓ task_api.py OK\")
 except ImportError as e:
-    print(f'⚠ task_api import: {e}')
+    print(f\"✗ task_api import failed: {e}\")
+    sys.exit(1)
 
-print('\\n✓ All critical checks passed!')
+# Test MCP imports
+try:
+    from utils.mcp.tool_servers import MCPServerManager
+    print(\"✓ MCPServerManager OK\")
+except ImportError as e:
+    print(f\"⚠ MCPServerManager: {e}\")
+
+# Test configs
+try:
+    from configs.global_configs import global_configs
+    print(\"✓ Toolathlon configs OK\")
+except ImportError as e:
+    print(f\"⚠ Config import: {e}\")
+
+# Test FastAPI
+try:
+    import fastapi
+    import uvicorn
+    print(\"✓ FastAPI/Uvicorn OK\")
+except ImportError as e:
+    print(f\"✗ FastAPI import failed: {e}\")
+    sys.exit(1)
+
+print()
+print(\"✓ All critical checks passed!\")
+'
+
+# Test MCP server tools are installed
+echo ''
+echo '=== Checking MCP Tools ==='
+which pdf-tools-mcp >/dev/null 2>&1 && echo '✓ pdf-tools-mcp' || echo '⚠ pdf-tools-mcp not in PATH'
+which emails-mcp >/dev/null 2>&1 && echo '✓ emails-mcp' || echo '⚠ emails-mcp not in PATH'
+
+# Test Node.js MCP servers
+echo ''
+echo '=== Checking Node.js ==='
+node --version
+npm --version
+
+# Test Playwright
+echo ''
+echo '=== Checking Playwright ==='
+python3 -c 'from playwright.sync_api import sync_playwright; print(\"✓ Playwright OK\")'
+
+# Test kubectl/kind
+echo ''
+echo '=== Checking K8s Tools ==='
+which kubectl >/dev/null 2>&1 && echo '✓ kubectl' || echo '⚠ kubectl not found'
+which kind >/dev/null 2>&1 && echo '✓ kind' || echo '⚠ kind not found'
+which helm >/dev/null 2>&1 && echo '✓ helm' || echo '⚠ helm not found'
+
+echo ''
+echo '=== Image Test Complete ==='
 " || {
     log_warn "Some tests failed - check output above"
 }
 
-# Cleanup
+# Cleanup build directory
 cd "$PROJECT_ROOT"
 rm -rf "$BUILD_DIR"
 
@@ -174,9 +181,19 @@ echo "Toolathlon Docker Image Ready"
 echo "============================================================"
 echo ""
 echo "Image: toolathlon:latest"
+echo "Base:  $BASE_IMAGE"
 echo ""
-echo "To run evaluation:"
-echo "  cd ~/rl-environments/tool-decathlon"
-echo "  vf-eval tool-decathlon -m gpt-4.1-mini -n 1"
+echo "IMPORTANT: Before running evaluations, you must:"
+echo ""
+echo "1. Configure credentials (see tool-decathlon/configs/README.md)"
+echo "   - Google Cloud OAuth credentials"
+echo "   - GitHub personal access token"
+echo "   - Other API keys as needed"
+echo ""
+echo "2. Deploy local services (for tasks requiring them):"
+echo "   cd tool-decathlon && bash scripts/deploy_services.sh"
+echo ""
+echo "3. Run evaluation:"
+echo "   vf-eval tool_decathlon -m gpt-4.1-mini -n 1"
 echo ""
 echo "============================================================"

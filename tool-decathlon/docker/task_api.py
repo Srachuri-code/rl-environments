@@ -2,18 +2,28 @@
 """
 Task API - Thin wrapper to use Toolathlon's infrastructure from Docker.
 
-Just imports and uses Toolathlon's actual classes - no reinventing.
+This API runs inside the Toolathlon Docker container and provides HTTP endpoints
+for the verifiers RL environment to:
+  1. Setup tasks (start MCP servers)
+  2. Execute tools
+  3. Run evaluations
+  4. Cleanup connections
+
+The base image (lockon0927/toolathlon-task-image:1016beta) has all MCP servers
+pre-installed. This API just manages their lifecycle.
 """
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
+import os
 from pathlib import Path
 from typing import Any
 
-# Add Toolathlon to path
-sys.path.insert(0, "/toolathlon")
+# Toolathlon image uses /workspace as the project root
+TOOLATHLON_ROOT = "/workspace"
+sys.path.insert(0, TOOLATHLON_ROOT)
 
 # Import anyio (Toolathlon uses this for async)
 import anyio
@@ -46,7 +56,7 @@ class MinimalAgentContext:
 
 
 class TaskAPI:
-    """Persistent API that keeps MCP servers alive."""
+    """Persistent API that keeps MCP servers alive across tool calls."""
     
     def __init__(self):
         self.task_id = None
@@ -85,16 +95,22 @@ class TaskAPI:
         """Setup task and start MCP servers (keep them alive).
         
         Args:
-            task_id: Task identifier
-            mcp_servers: List of MCP servers to start (from dataset; if None, read from config)
-            local_tools: List of local tool capabilities (from dataset; if None, read from config)
+            task_id: Task identifier (e.g. "find-alita-paper")
+            mcp_servers: List of MCP servers to start (from dataset)
+            local_tools: List of local tool capabilities (from dataset)
+        
+        Returns:
+            dict with status, workspace path, and tool schemas
         """
         print(f"[SETUP] Starting setup for task: {task_id}", flush=True)
-        # Prevent concurrent setup (can happen if the harness retries)
+        
+        # Prevent concurrent setup
         async with self._setup_lock:
             print(f"[SETUP] Lock acquired", flush=True)
             self.task_id = task_id
-            self.workspace = f"/toolathlon/agent_workspace/{task_id}"
+            
+            # Workspace for agent outputs (mounted from host in container)
+            self.workspace = f"{TOOLATHLON_ROOT}/agent_workspace/{task_id}"
             Path(self.workspace).mkdir(parents=True, exist_ok=True)
             print(f"[SETUP] Workspace created: {self.workspace}", flush=True)
 
@@ -102,12 +118,18 @@ class TaskAPI:
             self.context = MinimalAgentContext(self.workspace, self.messages)
             self.messages = []
 
-            # Use provided tool lists (from dataset) or fall back to reading task config
+            # Use provided tool lists or fall back to reading task config
             if mcp_servers is None or local_tools is None:
                 print(f"[SETUP] Reading task config from disk", flush=True)
-                task_config = read_json(f"/toolathlon/tasks/finalpool/{task_id}/task_config.json")
-                needed_mcps = mcp_servers if mcp_servers is not None else task_config.get("needed_mcp_servers", [])
-                needed_local_tools = local_tools if local_tools is not None else task_config.get("needed_local_tools", [])
+                task_config_path = f"{TOOLATHLON_ROOT}/tasks/finalpool/{task_id}/task_config.json"
+                if Path(task_config_path).exists():
+                    task_config = read_json(task_config_path)
+                    needed_mcps = mcp_servers if mcp_servers is not None else task_config.get("needed_mcp_servers", [])
+                    needed_local_tools = local_tools if local_tools is not None else task_config.get("needed_local_tools", [])
+                else:
+                    print(f"[SETUP] WARNING: Task config not found at {task_config_path}", flush=True)
+                    needed_mcps = mcp_servers or []
+                    needed_local_tools = local_tools or []
             else:
                 needed_mcps = mcp_servers
                 needed_local_tools = local_tools
@@ -115,15 +137,15 @@ class TaskAPI:
             print(f"[SETUP] Will start {len(needed_mcps)} MCP servers: {needed_mcps}", flush=True)
             print(f"[SETUP] Will enable {len(needed_local_tools)} local tool caps: {needed_local_tools}", flush=True)
 
-            # Create MCP manager (keep alive)
+            # Create MCP manager (keeps connections alive)
             print(f"[SETUP] Creating MCP manager", flush=True)
             self.mcp_manager = MCPServerManager(
                 agent_workspace=self.workspace,
-                config_dir="/toolathlon/configs/mcp_servers",
+                config_dir=f"{TOOLATHLON_ROOT}/configs/mcp_servers",
                 debug=False,
             )
 
-            # Connect servers
+            # Connect to MCP servers
             if needed_mcps:
                 print(f"[SETUP] Connecting to {len(needed_mcps)} MCP servers...", flush=True)
                 for i, server_name in enumerate(needed_mcps):
@@ -131,7 +153,7 @@ class TaskAPI:
                 await self.mcp_manager.connect_servers(needed_mcps)
                 print(f"[SETUP] All MCP servers connected", flush=True)
 
-            # Get tools from connected servers
+            # Collect tool schemas from connected MCP servers
             print(f"[SETUP] Listing tools from MCP servers...", flush=True)
             all_tools = []
             for server_name in self.mcp_manager.get_connected_server_names():
@@ -141,39 +163,28 @@ class TaskAPI:
                 print(f"[SETUP]   Found {len(tools_list)} tools from {server_name}", flush=True)
 
                 for tool in tools_list:
-                    all_tools.append(
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": f"{server_name}-{tool.name}",  # Use hyphen like Toolathlon does
-                                "description": tool.description or "",
-                                "parameters": tool.inputSchema or {"type": "object", "properties": {}},
-                            },
-                        }
-                    )
+                    all_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": f"{server_name}-{tool.name}",  # Hyphen separator like Toolathlon
+                            "description": tool.description or "",
+                            "parameters": tool.inputSchema or {"type": "object", "properties": {}},
+                        },
+                    })
             
             print(f"[SETUP] Total MCP tools: {len(all_tools)}", flush=True)
             print(f"[SETUP] Expanding local tool capabilities...", flush=True)
 
-            # Add local tools
-            # Toolathlon task configs specify *capabilities* (e.g. "history") rather than
-            # the concrete tool names (e.g. "search_history", "browse_history", ...).
-            # Expand these capability flags into the real local FunctionTool set and
-            # preserve their real JSON schemas so models can call them correctly.
-
+            # Add local tools based on capability flags
             def _tool_to_oai(tool_obj) -> dict[str, Any]:
-                """Convert a Toolathlon FunctionTool to OpenAI tool schema.
-                
-                Uses Toolathlon's exact tool name - no normalization.
-                """
+                """Convert a Toolathlon FunctionTool to OpenAI tool schema."""
                 name = getattr(tool_obj, "name", "")
                 desc = getattr(tool_obj, "description", "") or ""
                 schema = getattr(tool_obj, "params_json_schema", None) or {"type": "object", "properties": {}}
-
                 return {
                     "type": "function",
                     "function": {
-                        "name": name,  # Exact name from Toolathlon
+                        "name": f"local-{name}",  # Prefix local tools
                         "description": desc,
                         "parameters": schema,
                     },
@@ -195,11 +206,8 @@ class TaskAPI:
                     local_tool_objs.append(tool_python_execute)
                 elif cap in ("web_search", "local-web_search"):
                     local_tool_objs.append(tool_web_search)
-                else:
-                    # Unknown capability flag; ignore silently.
-                    pass
 
-            # Deduplicate by tool name (only expose each tool once)
+            # Deduplicate by tool name
             print(f"[SETUP] Processing {len(local_tool_objs)} local tool objects...", flush=True)
             seen = set()
             for tool_obj in local_tool_objs:
@@ -210,7 +218,7 @@ class TaskAPI:
                 all_tools.append(_tool_to_oai(tool_obj))
             
             print(f"[SETUP] Total tools (MCP + local): {len(all_tools)}", flush=True)
-            print(f"[SETUP] Setup complete! Returning tool schemas", flush=True)
+            print(f"[SETUP] Setup complete!", flush=True)
 
             return {
                 "status": "ready",
@@ -226,28 +234,39 @@ class TaskAPI:
         self.messages.append({
             "tool_name": tool_name,
             "args": args,
-            "timestamp": str(Path.ctime(Path(self.workspace)))
         })
         
-        # Try local tools first (direct lookup - use Toolathlon's exact names)
+        # Handle local tools (prefixed with "local-")
+        if tool_name.startswith("local-"):
+            local_name = tool_name[6:]  # Remove "local-" prefix
+            if local_name in self.local_tools_map:
+                try:
+                    tool = self.local_tools_map[local_name]
+                    self.context.messages = self.messages
+                    result = await tool.on_invoke_tool(self.context, json.dumps(args))
+                    self.messages[-1]["result"] = str(result)[:500]
+                    return str(result) if result else "Tool executed successfully"
+                except Exception as e:
+                    error_msg = f"Error executing local tool {tool_name}: {e}"
+                    self.messages[-1]["error"] = str(e)
+                    return error_msg
+            else:
+                return f"Unknown local tool: {local_name}"
+        
+        # Also check direct local tool names (for backward compatibility)
         if tool_name in self.local_tools_map:
             try:
                 tool = self.local_tools_map[tool_name]
-                # Update context with current messages
                 self.context.messages = self.messages
-                # Call Toolathlon's tool handler
                 result = await tool.on_invoke_tool(self.context, json.dumps(args))
-                
-                # Track result
-                self.messages[-1]["result"] = str(result)[:500]  # Truncate for memory
-                
+                self.messages[-1]["result"] = str(result)[:500]
                 return str(result) if result else "Tool executed successfully"
             except Exception as e:
                 error_msg = f"Error executing local tool {tool_name}: {e}"
                 self.messages[-1]["error"] = str(e)
                 return error_msg
         
-        # MCP tools (server-tool format, using hyphen like Toolathlon)
+        # MCP tools (server-tool format with hyphen separator)
         if "-" not in tool_name:
             return f"Unknown tool: {tool_name}"
         
@@ -276,34 +295,45 @@ class TaskAPI:
             return f"Error calling {tool_name}: {e}"
     
     async def evaluate(self) -> bool:
-        """Run Toolathlon's evaluator."""
+        """Run Toolathlon's task evaluator."""
         if not self.task_id:
             return False
         
         try:
-            eval_path = f"/toolathlon/tasks/finalpool/{self.task_id}/evaluator.py"
+            eval_path = f"{TOOLATHLON_ROOT}/tasks/finalpool/{self.task_id}/evaluator.py"
             if not Path(eval_path).exists():
+                print(f"[EVAL] No evaluator found at {eval_path}, returning True", flush=True)
                 return True
             
+            print(f"[EVAL] Running evaluator for {self.task_id}...", flush=True)
+            
+            # Run evaluator using Toolathlon's Python environment
             result = subprocess.run(
-                ["/toolathlon/.venv/bin/python", "-c",
-                 f"import sys; sys.path.insert(0, '/toolathlon'); "
-                 f"from tasks.finalpool.{self.task_id}.evaluator import evaluate; "
+                [f"{TOOLATHLON_ROOT}/.venv/bin/python", "-c",
+                 f"import sys; sys.path.insert(0, '{TOOLATHLON_ROOT}'); "
+                 f"from tasks.finalpool.{self.task_id.replace('-', '_')}.evaluator import evaluate; "
                  f"result = evaluate('{self.workspace}'); "
                  f"print('true' if result else 'false')"],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=300,  # 5 min timeout for complex evals
+                cwd=TOOLATHLON_ROOT,
             )
             
-            return result.stdout.strip().lower() == "true"
+            success = result.stdout.strip().lower() == "true"
+            print(f"[EVAL] Result: {success} (stdout: {result.stdout[:200]})", flush=True)
+            if result.stderr:
+                print(f"[EVAL] Stderr: {result.stderr[:500]}", flush=True)
+            
+            return success
             
         except Exception as e:
-            print(f"Eval error: {e}", file=sys.stderr)
+            print(f"[EVAL] Error: {e}", file=sys.stderr, flush=True)
             return False
     
     async def cleanup(self):
         """Cleanup MCP connections."""
+        print(f"[CLEANUP] Cleaning up...", flush=True)
         if self.mcp_manager:
             await self.mcp_manager.ensure_all_disconnected()
         self.mcp_manager = None
@@ -311,28 +341,33 @@ class TaskAPI:
         self.workspace = None
         self.context = None
         self.messages = []
+        print(f"[CLEANUP] Done", flush=True)
 
 
-# Global instance (keeps servers alive across calls)
+# Global instance (keeps servers alive across HTTP calls)
 _api = TaskAPI()
 
 
 async def serve(host: str, port: int):
     """
-    Start a tiny HTTP server inside the container.
-
-    This exists to support RL stepping loops: we keep MCP connections alive
-    and avoid spawning a new Python process for every tool call.
+    Start HTTP server inside the container.
+    
+    Endpoints:
+      GET  /health   - Health check
+      POST /setup    - Initialize task (start MCP servers)
+      POST /execute  - Execute a tool call
+      POST /evaluate - Run task evaluator
+      POST /cleanup  - Cleanup connections
     """
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse, PlainTextResponse
     import uvicorn
 
-    app = FastAPI()
+    app = FastAPI(title="Toolathlon Task API")
 
     @app.get("/health")
     async def health():
-        return {"ok": True}
+        return {"ok": True, "task_id": _api.task_id}
 
     @app.post("/setup")
     async def setup(payload: dict[str, Any]):
@@ -340,9 +375,8 @@ async def serve(host: str, port: int):
         if not task_id:
             return JSONResponse({"error": "missing task_id"}, status_code=400)
         
-        # Tool metadata can be passed from dataset (avoids re-reading config file)
-        mcp_servers = payload.get("mcp_servers")  # Optional
-        local_tools = payload.get("local_tools")  # Optional
+        mcp_servers = payload.get("mcp_servers")
+        local_tools = payload.get("local_tools")
         
         result = await _api.setup(str(task_id), mcp_servers, local_tools)
         return JSONResponse(result)
@@ -354,7 +388,6 @@ async def serve(host: str, port: int):
         if not tool_name:
             return JSONResponse({"error": "missing tool_name"}, status_code=400)
         result = await _api.execute_tool(str(tool_name), dict(args))
-        # Toolathlon tools often return text; return plain text for simplicity.
         return PlainTextResponse(str(result))
 
     @app.post("/evaluate")
@@ -367,14 +400,14 @@ async def serve(host: str, port: int):
         await _api.cleanup()
         return JSONResponse({"status": "cleaned"})
 
-    # Use Server directly to avoid nested asyncio.run() when already in async context
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    print(f"[SERVER] Starting Task API on {host}:{port}", flush=True)
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
 
 
 async def main():
-    """CLI interface using persistent global API instance."""
+    """CLI interface."""
     if len(sys.argv) < 2:
         print(json.dumps({"error": "Usage: task_api.py <command> [args...]"}))
         sys.exit(1)
@@ -402,7 +435,6 @@ async def main():
             print(json.dumps({"status": "cleaned"}))
 
         elif command == "serve":
-            # Example: python task_api.py serve --host 0.0.0.0 --port 8000
             host = "127.0.0.1"
             port = 8000
             if "--host" in sys.argv:
