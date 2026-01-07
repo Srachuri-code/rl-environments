@@ -1,9 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# Build Toolathlon Docker Image for Prime Sandboxes
+# Build Toolathlon Docker Image for Verifiers RL Environment
 # =============================================================================
-# Creates a Docker image with Toolathlon fully configured.
-# This image is used by prime-sandboxes for isolated task execution.
+# Creates a Docker image based on official Toolathlon with task_api.py added.
 #
 # Usage:
 #   ./build_toolathlon_image.sh
@@ -15,90 +14,127 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TOOLATHLON_DIR="${SCRIPT_DIR}/../toolathlon-server"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD_DIR="$PROJECT_ROOT/.docker-build"
 
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 echo "============================================================"
 echo "Building Toolathlon Docker Image"
 echo "============================================================"
 
-# Clone Toolathlon if not exists
-if [ ! -d "$TOOLATHLON_DIR" ]; then
-    log_info "Cloning Toolathlon..."
-    git clone https://github.com/hkust-nlp/Toolathlon.git "$TOOLATHLON_DIR"
-fi
+# Clean build directory
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR"
 
-# Copy task API wrapper BEFORE cd
-log_info "Adding task API wrapper..."
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cp "$PROJECT_ROOT/docker/task_api.py" "$TOOLATHLON_DIR/task_api.py"
+# Clone fresh Toolathlon repo
+log_info "Cloning official Toolathlon repository..."
+git clone --depth 1 https://github.com/hkust-nlp/Toolathlon.git "$BUILD_DIR/toolathlon"
 
-cd "$TOOLATHLON_DIR"
+# Copy task API wrapper
+log_info "Adding task_api.py wrapper..."
+cp "$PROJECT_ROOT/docker/task_api.py" "$BUILD_DIR/toolathlon/task_api.py"
 
-# Create Dockerfile for sandboxes
+cd "$BUILD_DIR/toolathlon"
+
+# Create optimized Dockerfile
 log_info "Creating Dockerfile..."
-
-cat > Dockerfile.sandbox << 'EOF'
+cat > Dockerfile.verifiers << 'DOCKERFILE'
 FROM ubuntu:22.04
 
-# Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TOOLATHLON_HOME=/toolathlon
+ENV PATH="/root/.local/bin:$PATH"
 
-# Install system dependencies
+# Install system dependencies (minimal set for MCP servers)
 RUN apt-get update && apt-get install -y \
     curl \
     git \
     python3.11 \
     python3.11-venv \
+    python3.11-dev \
     python3-pip \
     nodejs \
     npm \
-    docker.io \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
+# Install uv package manager
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
 
-# Clone Toolathlon
 WORKDIR /toolathlon
 COPY . .
 
-# Install dependencies
-RUN bash global_preparation/install_env_minimal.sh false || true
+# Create venv and install Toolathlon dependencies
+RUN /root/.local/bin/uv venv .venv --python python3.11
 
-# Install lightweight runtime server deps (for step-by-step RL tool execution)
-# This avoids spawning a new Python process per tool call via `docker exec`.
-RUN /root/.local/bin/uv pip install --python /toolathlon/.venv/bin/python fastapi==0.115.5 uvicorn==0.32.1 httpx==0.27.2 || true
+# Install core dependencies from pyproject.toml
+RUN /root/.local/bin/uv pip install --python .venv/bin/python \
+    -e . \
+    || echo "pyproject.toml install failed, trying requirements approach"
 
-# Pull Toolathlon Docker image (for task containers)
-RUN bash global_preparation/pull_toolathlon_image.sh || true
+# Install task_api.py dependencies explicitly
+RUN /root/.local/bin/uv pip install --python .venv/bin/python \
+    fastapi==0.115.5 \
+    uvicorn==0.32.1 \
+    httpx==0.27.2 \
+    anyio \
+    pydantic \
+    pyyaml \
+    mcp
+
+# Install npm dependencies for Node.js MCP servers
+RUN npm install -g \
+    @anthropic-ai/mcp \
+    @anthropic-ai/mcp-server-memory \
+    || true
 
 # Create workspace directory
 RUN mkdir -p /toolathlon/agent_workspace
 
 WORKDIR /toolathlon
 CMD ["/bin/bash"]
-EOF
+DOCKERFILE
 
 log_info "Building Docker image..."
-docker build -f Dockerfile.sandbox -t toolathlon:latest .
+docker build -f Dockerfile.verifiers -t toolathlon:latest .
 
 log_info "✓ Image built: toolathlon:latest"
 
 # Test the image
 log_info "Testing image..."
-docker run --rm toolathlon:latest python3 -c "print('Toolathlon image ready')" || {
-    log_warn "Image test failed, but image was built"
+docker run --rm toolathlon:latest /toolathlon/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '/toolathlon')
+try:
+    import anyio
+    import fastapi
+    import uvicorn
+    print('✓ Core dependencies OK')
+except ImportError as e:
+    print(f'✗ Missing: {e}')
+    sys.exit(1)
+
+try:
+    from task_api import TaskAPI
+    print('✓ task_api.py imports OK')
+except ImportError as e:
+    print(f'⚠ task_api import issue (may need MCP servers): {e}')
+" || {
+    log_warn "Some tests failed, but image was built"
 }
+
+# Cleanup
+cd "$PROJECT_ROOT"
+rm -rf "$BUILD_DIR"
 
 echo ""
 echo "============================================================"
@@ -107,9 +143,8 @@ echo "============================================================"
 echo ""
 echo "Image: toolathlon:latest"
 echo ""
-echo "Next steps:"
-echo "  1. Push to registry: docker push your-registry/toolathlon:latest"
-echo "  2. Use in environment: load_environment(toolathlon_image='toolathlon:latest')"
+echo "To run evaluation:"
+echo "  cd ~/rl-environments/tool-decathlon"
+echo "  vf-eval tool-decathlon -m gpt-4.1-mini -n 1"
 echo ""
 echo "============================================================"
-

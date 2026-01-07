@@ -5,7 +5,7 @@ tags = ["tool-use", "agents", "multi-turn", "train", "eval", "meta-learning"]
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "verifiers>=0.1.3.post0",
+    "verifiers>=0.1.8",
     "datasets>=4.4.1",
     "docker>=7.0.0",
     "loguru>=0.7.3",
