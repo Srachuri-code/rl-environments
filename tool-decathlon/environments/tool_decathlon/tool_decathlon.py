@@ -350,9 +350,10 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         logger.info(f"Starting runtime server, will be at {runtime_url}")
         
         # Start server in container (uses Toolathlon's venv)
+        # PYTHONPATH must include /workspace for utils module imports
         start_cmd = (
             f"cd /workspace && "
-            f"nohup .venv/bin/python task_api.py serve "
+            f"PYTHONPATH=/workspace nohup .venv/bin/python task_api.py serve "
             f"--host 0.0.0.0 --port {RUNTIME_CONTAINER_PORT} "
             f"> /tmp/runtime.log 2>&1 &"
         )
