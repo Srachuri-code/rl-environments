@@ -56,9 +56,9 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         dataset_path: Optional[str] = None,
         toolathlon_image: str = "toolathlon:latest",
         max_turns: int = 100,
-        runtime_timeout_s: float = 30.0,
-        setup_timeout_s: float = 300.0,  # MCP server initialization can be slow (5 min)
-        tool_timeout_s: float = 120.0,
+        runtime_timeout_s: float = 60.0,
+        setup_timeout_s: float = 600.0,  # MCP server initialization can be slow (10 min)
+        tool_timeout_s: float = 300.0,   # Individual tool calls (5 min)
         **kwargs,
     ):
         env_dir = Path(__file__).parent
