@@ -94,19 +94,20 @@ RUN /root/.local/bin/uv pip install --python .venv/bin/python -e . || \
     datasets tenacity requests
 
 # Ensure task_api.py and Toolathlon config dependencies are installed
+# Pin versions to match Toolathlon's pyproject.toml for compatibility
 RUN /root/.local/bin/uv pip install --python .venv/bin/python \
     fastapi==0.115.5 \
     uvicorn==0.32.1 \
-    httpx==0.27.2 \
-    anyio \
-    pydantic \
-    pyyaml \
-    mcp \
-    openai \
-    openai-agents \
-    aiohttp \
-    aiofiles \
-    addict
+    httpx==0.27.0 \
+    anyio==4.9.0 \
+    pydantic==2.11.3 \
+    pyyaml==6.0.2 \
+    mcp>=1.9.0 \
+    openai==1.76.0 \
+    "openai-agents==0.0.15" \
+    aiohttp==3.12.7 \
+    aiofiles==24.1.0 \
+    addict==2.4.0
 
 # Create workspace directory
 RUN mkdir -p /toolathlon/agent_workspace
