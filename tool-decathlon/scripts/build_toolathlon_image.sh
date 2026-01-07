@@ -45,7 +45,7 @@ cp "$PROJECT_ROOT/docker/task_api.py" "$BUILD_DIR/toolathlon/task_api.py"
 
 cd "$BUILD_DIR/toolathlon"
 
-# Create optimized Dockerfile
+# Create optimized Dockerfile that properly sets up Toolathlon
 log_info "Creating Dockerfile..."
 cat > Dockerfile.verifiers << 'DOCKERFILE'
 FROM ubuntu:22.04
@@ -54,13 +54,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TOOLATHLON_HOME=/toolathlon
 ENV PATH="/root/.local/bin:$PATH"
 
-# Install system dependencies (minimal set for MCP servers)
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
     git \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     python3-pip \
     nodejs \
     npm \
@@ -73,15 +73,24 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 WORKDIR /toolathlon
 COPY . .
 
-# Create venv and install Toolathlon dependencies
-RUN /root/.local/bin/uv venv .venv --python python3.11
+# Create config files from examples (required by Toolathlon)
+RUN cp configs/global_configs_example.py configs/global_configs.py || true
+RUN cp configs/token_key_session_example.py configs/token_key_session.py || true
 
-# Install core dependencies from pyproject.toml
-RUN /root/.local/bin/uv pip install --python .venv/bin/python \
-    -e . \
-    || echo "pyproject.toml install failed, trying requirements approach"
+# Create venv with Python 3.12
+RUN /root/.local/bin/uv venv .venv --python python3.12
 
-# Install task_api.py dependencies explicitly
+# Install Toolathlon with relaxed Python version
+RUN sed -i 's/requires-python = "==3.12.11"/requires-python = ">=3.11"/' pyproject.toml || true
+
+# Install Toolathlon dependencies
+RUN /root/.local/bin/uv pip install --python .venv/bin/python -e . || \
+    /root/.local/bin/uv pip install --python .venv/bin/python \
+    fastapi uvicorn httpx anyio pydantic pyyaml mcp \
+    openai openai-agents aiohttp aiofiles loguru \
+    datasets tenacity requests
+
+# Ensure task_api.py dependencies are installed
 RUN /root/.local/bin/uv pip install --python .venv/bin/python \
     fastapi==0.115.5 \
     uvicorn==0.32.1 \
@@ -89,13 +98,11 @@ RUN /root/.local/bin/uv pip install --python .venv/bin/python \
     anyio \
     pydantic \
     pyyaml \
-    mcp
-
-# Install npm dependencies for Node.js MCP servers
-RUN npm install -g \
-    @anthropic-ai/mcp \
-    @anthropic-ai/mcp-server-memory \
-    || true
+    mcp \
+    openai \
+    openai-agents \
+    aiohttp \
+    aiofiles
 
 # Create workspace directory
 RUN mkdir -p /toolathlon/agent_workspace
@@ -114,22 +121,42 @@ log_info "Testing image..."
 docker run --rm toolathlon:latest /toolathlon/.venv/bin/python -c "
 import sys
 sys.path.insert(0, '/toolathlon')
+
+# Test core dependencies
 try:
     import anyio
     import fastapi
     import uvicorn
     print('✓ Core dependencies OK')
 except ImportError as e:
-    print(f'✗ Missing: {e}')
+    print(f'✗ Missing core dep: {e}')
     sys.exit(1)
 
+# Test Toolathlon config import
+try:
+    from configs.global_configs import global_configs
+    print('✓ Toolathlon configs OK')
+except ImportError as e:
+    print(f'✗ Config import failed: {e}')
+    sys.exit(1)
+
+# Test MCP server manager import
+try:
+    from utils.mcp.tool_servers import MCPServerManager
+    print('✓ MCPServerManager OK')
+except ImportError as e:
+    print(f'⚠ MCPServerManager import: {e}')
+
+# Test task_api import
 try:
     from task_api import TaskAPI
-    print('✓ task_api.py imports OK')
+    print('✓ task_api.py OK')
 except ImportError as e:
-    print(f'⚠ task_api import issue (may need MCP servers): {e}')
+    print(f'⚠ task_api import: {e}')
+
+print('\\n✓ All critical checks passed!')
 " || {
-    log_warn "Some tests failed, but image was built"
+    log_warn "Some tests failed - check output above"
 }
 
 # Cleanup
