@@ -93,7 +93,7 @@ RUN /root/.local/bin/uv pip install --python .venv/bin/python -e . || \
     openai openai-agents aiohttp aiofiles loguru \
     datasets tenacity requests
 
-# Ensure task_api.py dependencies are installed
+# Ensure task_api.py and Toolathlon config dependencies are installed
 RUN /root/.local/bin/uv pip install --python .venv/bin/python \
     fastapi==0.115.5 \
     uvicorn==0.32.1 \
@@ -105,7 +105,8 @@ RUN /root/.local/bin/uv pip install --python .venv/bin/python \
     openai \
     openai-agents \
     aiohttp \
-    aiofiles
+    aiofiles \
+    addict
 
 # Create workspace directory
 RUN mkdir -p /toolathlon/agent_workspace
