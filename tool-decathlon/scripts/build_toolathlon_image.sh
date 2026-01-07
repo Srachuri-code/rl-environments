@@ -63,6 +63,14 @@ cat > "$BUILD_DIR/Dockerfile" << 'DOCKERFILE'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+# Clone Toolathlon source code to get utils/, configs/, tasks/
+# The base image has MCP tools but not the source code
+RUN git clone --depth 1 https://github.com/hkust-nlp/Toolathlon.git /tmp/toolathlon && \
+    cp -r /tmp/toolathlon/utils /workspace/utils && \
+    cp -r /tmp/toolathlon/configs /workspace/configs && \
+    cp -r /tmp/toolathlon/tasks /workspace/tasks && \
+    rm -rf /tmp/toolathlon
+
 # Add task_api.py for verifiers integration
 COPY task_api.py /workspace/task_api.py
 
