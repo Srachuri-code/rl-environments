@@ -69,7 +69,16 @@ RUN git clone --depth 1 https://github.com/hkust-nlp/Toolathlon.git /tmp/toolath
     cp -r /tmp/toolathlon/utils /workspace/utils && \
     cp -r /tmp/toolathlon/configs /workspace/configs && \
     cp -r /tmp/toolathlon/tasks /workspace/tasks && \
+    cp -r /tmp/toolathlon/local_binary /workspace/local_binary && \
     rm -rf /tmp/toolathlon
+
+# Create config files from examples (required for imports)
+# These will be overwritten at runtime with real credentials if provided
+RUN cp /workspace/configs/global_configs_example.py /workspace/configs/global_configs.py && \
+    cp /workspace/configs/token_key_session_example.py /workspace/configs/token_key_session.py
+
+# Add __init__.py to make configs a proper Python package
+RUN touch /workspace/configs/__init__.py
 
 # Add task_api.py for verifiers integration
 COPY task_api.py /workspace/task_api.py
