@@ -290,6 +290,32 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         """Return tools for this state (dynamic per task)."""
         return state.get("info", {}).get("oai_tools", [])
     
+    async def get_model_response(
+        self,
+        messages: vf.Messages,
+        state: vf.State,
+        client,
+        model: str,
+        sampling_args: dict | None = None,
+        **kwargs
+    ):
+        """Override to pass dynamic tools from state to OpenAI API."""
+        tools = self.get_tools(state)
+        sampling_args = sampling_args or {}
+        
+        # Remove any non-serializable items from kwargs before passing to API
+        api_kwargs = {k: v for k, v in kwargs.items() 
+                      if k not in ('client', 'state', 'env') and not callable(v)}
+        
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools if tools else None,
+            **sampling_args,
+            **api_kwargs,
+        )
+        return response
+    
     def _get_container(self, state: vf.State):
         """Get container object from state's container_id."""
         container_id = state.get("container_id")
