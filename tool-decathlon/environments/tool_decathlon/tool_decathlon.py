@@ -211,12 +211,19 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         )
         
         # Initialize state
+        # Note: Store container ID, not container object (must be JSON serializable)
         state.setdefault("info", {})
-        state["container"] = container
+        state["container_id"] = container.id
+        state["container_name"] = container.name
         state["task_id"] = task_id
         state["task_done"] = False
         state["eval_result"] = None
         state["runtime_port"] = runtime_port
+        
+        # Store container object separately (not in state that gets serialized)
+        if not hasattr(self, '_containers'):
+            self._containers = {}
+        self._containers[container.id] = container
         
         # Copy configs to container if available
         if self.configs_dir and Path(self.configs_dir).exists():
@@ -278,6 +285,17 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         except Exception:
             pass
         return state.get("task_done", False)
+    
+    def get_tools(self, state: vf.State) -> list[dict]:
+        """Return tools for this state (dynamic per task)."""
+        return state.get("info", {}).get("oai_tools", [])
+    
+    def _get_container(self, state: vf.State):
+        """Get container object from state's container_id."""
+        container_id = state.get("container_id")
+        if container_id and hasattr(self, '_containers'):
+            return self._containers.get(container_id)
+        return None
     
     async def env_response(
         self,
@@ -445,7 +463,9 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
     
     async def cleanup_state(self, state: vf.State, **kwargs):
         """Cleanup Docker container."""
-        container = state.get("container")
+        container = self._get_container(state)
+        container_id = state.get("container_id")
+        
         if container:
             try:
                 loop = asyncio.get_event_loop()
@@ -462,6 +482,10 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
                 # Stop container
                 await loop.run_in_executor(None, container.stop)
                 logger.info(f"Cleaned up container for {state.get('task_id')}")
+                
+                # Remove from internal tracking
+                if container_id and hasattr(self, '_containers'):
+                    self._containers.pop(container_id, None)
             except Exception as e:
                 logger.warning(f"Container cleanup failed: {e}")
 
