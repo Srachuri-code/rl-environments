@@ -378,8 +378,14 @@ async def serve(host: str, port: int):
         mcp_servers = payload.get("mcp_servers")
         local_tools = payload.get("local_tools")
         
-        result = await _api.setup(str(task_id), mcp_servers, local_tools)
-        return JSONResponse(result)
+        try:
+            result = await _api.setup(str(task_id), mcp_servers, local_tools)
+            return JSONResponse(result)
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"[SETUP] Error: {error_detail}", file=sys.stderr, flush=True)
+            return JSONResponse({"error": str(e), "traceback": error_detail}, status_code=500)
 
     @app.post("/execute")
     async def execute(payload: dict[str, Any]):

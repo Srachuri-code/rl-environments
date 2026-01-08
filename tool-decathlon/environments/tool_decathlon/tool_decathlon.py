@@ -412,7 +412,10 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
                     "local_tools": local_tools,
                 },
             )
-            r.raise_for_status()
+            if r.status_code >= 400:
+                error_detail = r.text
+                logger.error(f"Setup failed with status {r.status_code}: {error_detail}")
+                raise RuntimeError(f"Setup failed: {error_detail}")
             return r.json()
     
     async def _runtime_execute(self, runtime_url: str, tool_name: str, args: dict) -> str:
