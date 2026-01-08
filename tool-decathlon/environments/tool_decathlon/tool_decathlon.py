@@ -319,15 +319,17 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         self,
         messages: vf.Messages,
         state: vf.State,
+        client=None,  # Accept as positional but may not be the actual client
         **kwargs
     ):
         """Override to pass dynamic tools from state to OpenAI API.
         
-        The base class stores client and model as self.client and self.model
-        during evaluate(). We override to inject task-specific tools.
+        The verifiers framework may pass client as 4th positional argument.
+        We use self.client (set during evaluate()) if the passed client is invalid.
         """
-        # Get client and model from instance attributes (set by evaluate())
-        client = getattr(self, 'client', None)
+        # Use passed client if it's an actual OpenAI client, otherwise use self.client
+        if client is None or not hasattr(client, 'chat'):
+            client = getattr(self, 'client', None)
         model = getattr(self, 'model', 'gpt-4')
         sampling_args = kwargs.pop('sampling_args', {}) or {}
         
