@@ -319,22 +319,29 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         self,
         messages: vf.Messages,
         state: vf.State,
-        client=None,  # Accept as positional but may not be the actual client
+        client=None,  # Accept as positional - verifiers passes client here
         **kwargs
     ):
         """Override to pass dynamic tools from state to OpenAI API.
         
-        The verifiers framework may pass client as 4th positional argument.
-        We use self.client (set during evaluate()) if the passed client is invalid.
+        The verifiers framework passes client as 4th positional argument.
         """
-        # Use passed client if it's an actual OpenAI client, otherwise use self.client
-        if client is None or not hasattr(client, 'chat'):
-            client = getattr(self, 'client', None)
-        model = getattr(self, 'model', 'gpt-4')
-        sampling_args = kwargs.pop('sampling_args', {}) or {}
+        # Check for valid client in order: positional arg, kwargs, self attribute
+        if client is not None and hasattr(client, 'chat'):
+            pass  # Use passed client
+        elif 'client' in kwargs and hasattr(kwargs['client'], 'chat'):
+            client = kwargs.pop('client')
+        elif hasattr(self, 'client') and self.client is not None:
+            client = self.client
+        else:
+            # Debug: log what we actually received
+            logger.error(f"No valid client. Positional client type: {type(client)}, "
+                        f"kwargs keys: {list(kwargs.keys())}, "
+                        f"self.client: {getattr(self, 'client', 'NOT SET')}")
+            raise RuntimeError(f"No valid OpenAI client available. Got: {type(client)}")
         
-        if client is None:
-            raise RuntimeError("No client available - was evaluate() called?")
+        model = kwargs.pop('model', None) or getattr(self, 'model', 'gpt-4')
+        sampling_args = kwargs.pop('sampling_args', {}) or {}
         
         tools = self.get_tools(state)
         
