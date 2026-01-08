@@ -359,11 +359,22 @@ async def serve(host: str, port: int):
       POST /evaluate - Run task evaluator
       POST /cleanup  - Cleanup connections
     """
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, PlainTextResponse
     import uvicorn
 
     app = FastAPI(title="Toolathlon Task API")
+
+    # Global exception handler to catch ALL errors
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"[GLOBAL ERROR] {error_detail}", file=sys.stderr, flush=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "traceback": error_detail}
+        )
 
     @app.get("/health")
     async def health():
