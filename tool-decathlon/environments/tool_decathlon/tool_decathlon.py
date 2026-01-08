@@ -270,10 +270,10 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         except Exception as e:
             logger.warning(f"Failed to copy configs: {e}")
     
-    async def is_completed(self, messages: vf.Messages, state: vf.State, **kwargs) -> bool:
+    async def is_completed(self, state: vf.State, **kwargs) -> bool:
         """Check if task is complete."""
         try:
-            if await super().is_completed(messages, state, **kwargs):
+            if await super().is_completed(state, **kwargs):
                 return True
         except Exception:
             pass
