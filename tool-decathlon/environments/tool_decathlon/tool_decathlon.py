@@ -291,9 +291,37 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
             pass
         return state.get("task_done", False)
     
-    # NOTE: We do NOT override get_model_response - the base class handles everything.
-    # The verifiers framework reads tools from state["info"]["oai_tools"] and passes
-    # them to get_model_response via kwargs. The base class handles client creation.
+    async def get_model_response(self, messages, state, *args, **kwargs):
+        """Override to filter out non-serializable kwargs before API call.
+        
+        The verifiers framework may pass extra items in kwargs that aren't
+        JSON serializable (e.g., client references). We filter those out.
+        """
+        # Filter out non-serializable items from kwargs
+        def is_json_serializable(obj):
+            try:
+                json.dumps(obj)
+                return True
+            except (TypeError, ValueError):
+                return False
+        
+        # Keys to always exclude (known non-serializable)
+        exclude_keys = {'client', 'env', 'state', 'self'}
+        
+        # Filter kwargs
+        filtered_kwargs = {}
+        for k, v in kwargs.items():
+            if k in exclude_keys:
+                continue
+            if callable(v):
+                continue
+            if is_json_serializable(v):
+                filtered_kwargs[k] = v
+            else:
+                logger.debug(f"Filtering non-serializable kwarg: {k} (type: {type(v).__name__})")
+        
+        # Call parent with filtered kwargs
+        return await super().get_model_response(messages, state, *args, **filtered_kwargs)
     
     def _get_container(self, state: vf.State):
         """Get container object from state's container_id."""
