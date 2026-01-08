@@ -25,6 +25,7 @@ from typing import Any, Optional, Tuple
 
 import docker
 import httpx
+import random
 import verifiers as vf
 from datasets import Dataset, load_from_disk
 from loguru import logger
@@ -32,6 +33,10 @@ from openai.types.chat import ChatCompletionMessageToolCall
 
 
 RUNTIME_CONTAINER_PORT = 8000
+
+def _get_random_port() -> int:
+    """Get a random port in the ephemeral range for host network mode."""
+    return random.randint(30000, 60000)
 
 
 class ToolDecathlonEnv(vf.MultiTurnEnv):
@@ -180,10 +185,12 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         # Host network for local service access (Canvas, WooCommerce, Poste, etc.)
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
-            # With host network, we use localhost:RUNTIME_CONTAINER_PORT directly
+            # With host network, each container needs a unique port
+            runtime_port = _get_random_port()
         else:
             # Map container port to random host port
             run_kwargs["ports"] = {f"{RUNTIME_CONTAINER_PORT}/tcp": None}
+            runtime_port = RUNTIME_CONTAINER_PORT
         
         # Mount Docker socket for K8s tasks
         if self.mount_docker_socket:
@@ -209,13 +216,14 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         state["task_id"] = task_id
         state["task_done"] = False
         state["eval_result"] = None
+        state["runtime_port"] = runtime_port
         
         # Copy configs to container if available
         if self.configs_dir and Path(self.configs_dir).exists():
             await self._copy_configs_to_container(container, self.configs_dir)
         
         # Start runtime server and setup task
-        runtime_url = await self._start_runtime_server(container)
+        runtime_url = await self._start_runtime_server(container, runtime_port)
         state["runtime_url"] = runtime_url
         
         # Get tool requirements from dataset
@@ -322,24 +330,24 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         
         return responses, state
     
-    async def _start_runtime_server(self, container) -> str:
+    async def _start_runtime_server(self, container, runtime_port: int) -> str:
         """Start task_api.py HTTP server in container."""
         loop = asyncio.get_event_loop()
         
         # Determine URL based on network mode
         if self.use_host_network:
-            # With host network, server binds to localhost
-            runtime_url = f"http://127.0.0.1:{RUNTIME_CONTAINER_PORT}"
+            # With host network, server binds to localhost on the unique port
+            runtime_url = f"http://127.0.0.1:{runtime_port}"
         else:
-            # Get mapped port
+            # Get mapped port from Docker
             await loop.run_in_executor(None, container.reload)
             ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-            bindings = ports.get(f"{RUNTIME_CONTAINER_PORT}/tcp")
+            bindings = ports.get(f"{runtime_port}/tcp")
             if not bindings:
                 await asyncio.sleep(0.5)
                 await loop.run_in_executor(None, container.reload)
                 ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-                bindings = ports.get(f"{RUNTIME_CONTAINER_PORT}/tcp")
+                bindings = ports.get(f"{runtime_port}/tcp")
             
             if not bindings:
                 raise RuntimeError("Failed to get port mapping")
@@ -354,7 +362,7 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         start_cmd = (
             f"cd /workspace && "
             f"PYTHONPATH=/workspace nohup .venv/bin/python task_api.py serve "
-            f"--host 0.0.0.0 --port {RUNTIME_CONTAINER_PORT} "
+            f"--host 0.0.0.0 --port {runtime_port} "
             f"> /tmp/runtime.log 2>&1 &"
         )
         
