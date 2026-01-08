@@ -223,6 +223,8 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         # Store container object separately (not in state that gets serialized)
         if not hasattr(self, '_containers'):
             self._containers = {}
+        if not hasattr(self, '_tools'):
+            self._tools = {}
         self._containers[container.id] = container
         
         # Copy configs to container if available
@@ -251,6 +253,9 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         })
         
         state["info"]["oai_tools"] = tools
+        
+        # Also store tools at instance level for lookup in get_model_response
+        self._tools[container.id] = tools
         
         logger.info(f"Container ready with {len(tools)} tools for task {task_id}")
         return state
@@ -286,9 +291,29 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
             pass
         return state.get("task_done", False)
     
-    def get_tools(self, state: vf.State) -> list[dict]:
-        """Return tools for this state (dynamic per task)."""
-        return state.get("info", {}).get("oai_tools", [])
+    def get_tools(self, state) -> list[dict]:
+        """Return tools for this state (dynamic per task).
+        
+        Handles case where state might be passed differently by verifiers framework.
+        Falls back to instance-level tool storage.
+        """
+        # Try to get from state dict first
+        if isinstance(state, dict):
+            container_id = state.get("container_id")
+            # Try instance-level lookup by container_id
+            if container_id and hasattr(self, '_tools') and container_id in self._tools:
+                return self._tools[container_id]
+            # Try from state info
+            tools = state.get("info", {}).get("oai_tools", [])
+            if tools:
+                return tools
+        
+        # Fallback: return tools from any active container (single rollout case)
+        if hasattr(self, '_tools') and self._tools:
+            # Return the most recent tools
+            return list(self._tools.values())[0] if self._tools else []
+        
+        return []
     
     async def get_model_response(
         self,
@@ -511,8 +536,11 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
                 logger.info(f"Cleaned up container for {state.get('task_id')}")
                 
                 # Remove from internal tracking
-                if container_id and hasattr(self, '_containers'):
-                    self._containers.pop(container_id, None)
+                if container_id:
+                    if hasattr(self, '_containers'):
+                        self._containers.pop(container_id, None)
+                    if hasattr(self, '_tools'):
+                        self._tools.pop(container_id, None)
             except Exception as e:
                 logger.warning(f"Container cleanup failed: {e}")
 
