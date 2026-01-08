@@ -295,10 +295,11 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         messages: vf.Messages,
         state: vf.State,
         client,
-        model: str,
         **kwargs
     ):
         """Override to pass dynamic tools from state to OpenAI API."""
+        # Extract model from kwargs (verifiers passes it there, not positionally)
+        model = kwargs.pop('model', None) or getattr(self, 'model', 'gpt-4')
         sampling_args = kwargs.pop('sampling_args', {}) or {}
         
         tools = self.get_tools(state)
