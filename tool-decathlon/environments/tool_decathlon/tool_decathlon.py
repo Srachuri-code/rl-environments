@@ -295,15 +295,11 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         messages: vf.Messages,
         state: vf.State,
         client,
+        model: str,
         **kwargs
     ):
         """Override to pass dynamic tools from state to OpenAI API."""
-        # Extract model from kwargs
-        model = kwargs.pop('model', None)
         sampling_args = kwargs.pop('sampling_args', {}) or {}
-        
-        if not model:
-            raise ValueError("model is required for get_model_response")
         
         tools = self.get_tools(state)
         
