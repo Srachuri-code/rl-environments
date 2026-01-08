@@ -319,19 +319,26 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         self,
         messages: vf.Messages,
         state: vf.State,
-        client,
         **kwargs
     ):
-        """Override to pass dynamic tools from state to OpenAI API."""
-        # Extract model from kwargs (verifiers passes it there, not positionally)
-        model = kwargs.pop('model', None) or getattr(self, 'model', 'gpt-4')
+        """Override to pass dynamic tools from state to OpenAI API.
+        
+        The base class stores client and model as self.client and self.model
+        during evaluate(). We override to inject task-specific tools.
+        """
+        # Get client and model from instance attributes (set by evaluate())
+        client = getattr(self, 'client', None)
+        model = getattr(self, 'model', 'gpt-4')
         sampling_args = kwargs.pop('sampling_args', {}) or {}
+        
+        if client is None:
+            raise RuntimeError("No client available - was evaluate() called?")
         
         tools = self.get_tools(state)
         
         # Remove any non-serializable items from kwargs before passing to API
         api_kwargs = {k: v for k, v in kwargs.items() 
-                      if k not in ('state', 'env') and not callable(v)}
+                      if k not in ('state', 'env', 'model', 'client') and not callable(v)}
         
         response = await client.chat.completions.create(
             model=model,
