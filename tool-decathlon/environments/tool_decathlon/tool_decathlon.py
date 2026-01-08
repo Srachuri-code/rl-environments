@@ -302,6 +302,18 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
             return self._containers.get(container_id)
         return None
     
+    async def _get_container_logs(self, container, log_file: str = "/tmp/runtime.log") -> str:
+        """Fetch logs from container for debugging."""
+        try:
+            loop = asyncio.get_event_loop()
+            _, log_output = await loop.run_in_executor(
+                None,
+                lambda: container.exec_run(["/bin/cat", log_file])
+            )
+            return log_output.decode() if log_output else "No logs available"
+        except Exception as e:
+            return f"Could not retrieve logs: {e}"
+    
     async def env_response(
         self,
         messages: vf.Messages,
@@ -399,16 +411,21 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         
         deadline = time.time() + self.runtime_timeout_s
         last_error = None
+        check_count = 0
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             while time.time() < deadline:
+                check_count += 1
                 try:
                     r = await client.get(f"{runtime_url}/health")
                     if r.status_code == 200:
-                        logger.info(f"Runtime server healthy at {runtime_url}")
+                        logger.info(f"Runtime server healthy at {runtime_url} (after {check_count} checks)")
                         return runtime_url
                 except Exception as e:
                     last_error = str(e)
+                    if check_count % 5 == 0:  # Log every 5 attempts
+                        elapsed = time.time() - (deadline - self.runtime_timeout_s)
+                        logger.debug(f"Health check #{check_count} failed after {elapsed:.1f}s: {last_error}")
                 
                 await asyncio.sleep(1.0)
         
@@ -432,32 +449,63 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
         self, runtime_url: str, task_id: str, mcp_servers: list[str], local_tools: list[str]
     ) -> dict[str, Any]:
         """Setup task via HTTP API."""
-        logger.info(f"Setting up task {task_id} with {len(mcp_servers)} MCP servers")
+        logger.info(f"Setting up task {task_id} with {len(mcp_servers)} MCP servers: {mcp_servers}")
+        logger.info(f"Local tools: {local_tools}")
+        
+        start_time = time.time()
         
         async with httpx.AsyncClient(timeout=self.setup_timeout_s) as client:
-            r = await client.post(
-                f"{runtime_url}/setup",
-                json={
-                    "task_id": task_id,
-                    "mcp_servers": mcp_servers,
-                    "local_tools": local_tools,
-                },
-            )
-            if r.status_code >= 400:
-                error_detail = r.text
-                logger.error(f"Setup failed with status {r.status_code}: {error_detail}")
-                raise RuntimeError(f"Setup failed: {error_detail}")
-            return r.json()
+            try:
+                r = await client.post(
+                    f"{runtime_url}/setup",
+                    json={
+                        "task_id": task_id,
+                        "mcp_servers": mcp_servers,
+                        "local_tools": local_tools,
+                    },
+                )
+                elapsed = time.time() - start_time
+                logger.info(f"Setup request completed in {elapsed:.1f}s with status {r.status_code}")
+                
+                if r.status_code >= 400:
+                    error_detail = r.text
+                    logger.error(f"Setup failed with status {r.status_code}: {error_detail}")
+                    raise RuntimeError(f"Setup failed: {error_detail}")
+                
+                result = r.json()
+                logger.info(f"Setup result: connected_servers={result.get('connected_servers', 'N/A')}, "
+                           f"tool_count={result.get('tool_count', 'N/A')}")
+                return result
+            except httpx.ReadTimeout:
+                elapsed = time.time() - start_time
+                logger.error(f"Setup timed out after {elapsed:.1f}s (timeout={self.setup_timeout_s}s)")
+                raise RuntimeError(f"Setup timed out after {elapsed:.1f}s waiting for MCP servers")
     
     async def _runtime_execute(self, runtime_url: str, tool_name: str, args: dict) -> str:
         """Execute tool via HTTP API."""
+        logger.debug(f"Executing tool: {tool_name} with args: {str(args)[:200]}...")
+        start_time = time.time()
+        
         async with httpx.AsyncClient(timeout=self.tool_timeout_s) as client:
-            r = await client.post(
-                f"{runtime_url}/execute",
-                json={"tool_name": tool_name, "args": args}
-            )
-            r.raise_for_status()
-            return r.text
+            try:
+                r = await client.post(
+                    f"{runtime_url}/execute",
+                    json={"tool_name": tool_name, "args": args}
+                )
+                elapsed = time.time() - start_time
+                logger.debug(f"Tool {tool_name} completed in {elapsed:.2f}s with status {r.status_code}")
+                r.raise_for_status()
+                result = r.text
+                logger.debug(f"Tool {tool_name} result length: {len(result)} chars")
+                return result
+            except httpx.ReadTimeout:
+                elapsed = time.time() - start_time
+                logger.error(f"Tool {tool_name} timed out after {elapsed:.1f}s")
+                raise
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(f"Tool {tool_name} failed after {elapsed:.1f}s: {e}")
+                raise
     
     async def _runtime_evaluate(self, runtime_url: str) -> bool:
         """Run evaluation via HTTP API."""
