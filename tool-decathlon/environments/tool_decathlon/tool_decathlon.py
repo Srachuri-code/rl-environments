@@ -291,72 +291,9 @@ class ToolDecathlonEnv(vf.MultiTurnEnv):
             pass
         return state.get("task_done", False)
     
-    def get_tools(self, state) -> list[dict]:
-        """Return tools for this state (dynamic per task).
-        
-        Handles case where state might be passed differently by verifiers framework.
-        Falls back to instance-level tool storage.
-        """
-        # Try to get from state dict first
-        if isinstance(state, dict):
-            container_id = state.get("container_id")
-            # Try instance-level lookup by container_id
-            if container_id and hasattr(self, '_tools') and container_id in self._tools:
-                return self._tools[container_id]
-            # Try from state info
-            tools = state.get("info", {}).get("oai_tools", [])
-            if tools:
-                return tools
-        
-        # Fallback: return tools from any active container (single rollout case)
-        if hasattr(self, '_tools') and self._tools:
-            # Return the most recent tools
-            return list(self._tools.values())[0] if self._tools else []
-        
-        return []
-    
-    async def get_model_response(
-        self,
-        messages: vf.Messages,
-        state: vf.State,
-        client=None,  # Accept as positional - verifiers passes client here
-        **kwargs
-    ):
-        """Override to pass dynamic tools from state to OpenAI API.
-        
-        The verifiers framework passes client as 4th positional argument.
-        """
-        # Check for valid client in order: positional arg, kwargs, self attribute
-        if client is not None and hasattr(client, 'chat'):
-            pass  # Use passed client
-        elif 'client' in kwargs and hasattr(kwargs['client'], 'chat'):
-            client = kwargs.pop('client')
-        elif hasattr(self, 'client') and self.client is not None:
-            client = self.client
-        else:
-            # Debug: log what we actually received
-            logger.error(f"No valid client. Positional client type: {type(client)}, "
-                        f"kwargs keys: {list(kwargs.keys())}, "
-                        f"self.client: {getattr(self, 'client', 'NOT SET')}")
-            raise RuntimeError(f"No valid OpenAI client available. Got: {type(client)}")
-        
-        model = kwargs.pop('model', None) or getattr(self, 'model', 'gpt-4')
-        sampling_args = kwargs.pop('sampling_args', {}) or {}
-        
-        tools = self.get_tools(state)
-        
-        # Remove any non-serializable items from kwargs before passing to API
-        api_kwargs = {k: v for k, v in kwargs.items() 
-                      if k not in ('state', 'env', 'model', 'client') and not callable(v)}
-        
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools if tools else None,
-            **sampling_args,
-            **api_kwargs,
-        )
-        return response
+    # NOTE: We do NOT override get_model_response - the base class handles everything.
+    # The verifiers framework reads tools from state["info"]["oai_tools"] and passes
+    # them to get_model_response via kwargs. The base class handles client creation.
     
     def _get_container(self, state: vf.State):
         """Get container object from state's container_id."""
