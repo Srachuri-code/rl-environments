@@ -1,0 +1,26 @@
+[project]
+name = "multi-swe"
+description = "Multi-SWE RL Environment with OpenHands agent harness (simple Docker sandbox)"
+tags = ["multi-swe", "openhands", "train", "eval", "multilingual", "docker"]
+version = "0.5.0"
+requires-python = ">=3.11"
+dependencies = [
+    "verifiers>=0.1.8",
+    "multi-swe-bench",
+    "tenacity",
+    "datasets",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["multi_swe.py"]
+
+[tool.verifiers.eval]
+num_examples = 5
+rollouts_per_example = 3
+
+[tool.uv.sources]
+multi-swe-bench = {git = "https://github.com/multi-swe-bench/multi-swe-bench.git", rev = "e1c2bb6"}

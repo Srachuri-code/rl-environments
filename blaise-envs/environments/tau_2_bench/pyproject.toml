@@ -1,0 +1,31 @@
+[project]
+name = "tau-2-bench"
+description = "Verifiers implementation of tau2-bench with Gemini user simulator"
+tags = ["tool-agent-user", "tool-use", "multi-turn", "user-sim", "sierra-research"]
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0.0",
+    "datasets>=2.0.0",
+    "verifiers>=0.1.8.post1",
+    "loguru>=0.7.2",
+    "openai>=1.0.0",
+    "tau2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["tau_2_bench.py"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.verifiers.eval]
+num_examples = 5
+rollouts_per_example = 3
+
+[tool.uv.sources]
+tau2 = {git = "https://github.com/sierra-research/tau2-bench.git", rev = "558e6cd066d7bf05db587fa2dc1509765c7d03bc" }

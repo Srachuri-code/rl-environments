@@ -1,0 +1,1067 @@
+#!/usr/bin/env python3
+"""
+Toolathlon Remote Evaluation Server
+
+This server allows remote clients to submit evaluation tasks.
+Only one task can run at a time, with IP rate limiting (3 tasks per 24 hours).
+"""
+
+# Version control
+SERVER_VERSION = "1.0"
+SUPPORTED_CLIENT_VERSIONS = ["1.0"]  # List of supported client versions
+
+import asyncio
+import os
+import sys
+import time
+import uuid
+import json
+import tarfile
+import io
+import hashlib
+import tempfile
+import shutil
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, Dict, Any
+from collections import defaultdict
+
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import Response
+from pydantic import BaseModel
+import uvicorn
+
+def log(msg):
+    """Log with timestamp (local time + UTC)"""
+    local_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+    utc_time = datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
+    print(f"[{local_time}][UTC {utc_time}] {msg}", flush=True)
+
+app = FastAPI(title="Toolathlon Eval Server")
+
+# ===== Global State =====
+current_job: Optional[Dict[str, Any]] = None
+ip_submission_history: Dict[str, list] = defaultdict(list)
+ws_proxy_process = None  # Global WebSocket proxy process
+ws_proxy_log_file = None  # Global log file handle
+transferred_tasks: Dict[str, set] = defaultdict(set)  # job_id -> set of transferred task names
+
+# ===== Configuration =====
+TIMEOUT_SECONDS = 240 * 60  # 240 minutes
+MAX_SUBMISSIONS_PER_IP = 3
+RATE_LIMIT_HOURS = 24
+MAX_WORKERS = 10  # Will be updated in main
+DUMPS_DIR = "./dumps_public_service"
+SERVER_PORT = 8080  # Will be updated in main
+WS_PROXY_PORT = 8081  # Will be updated in main
+
+# ===== Request/Response Models =====
+
+class SubmitEvaluationRequest(BaseModel):
+    client_version: Optional[str] = None  # Client version for compatibility check (None means old client without version)
+    mode: str  # "public" or "private"
+    base_url: str
+    api_key: Optional[str] = None
+    model_name: str
+    workers: int = 10
+    custom_job_id: Optional[str] = None  # Allow custom job_id
+    model_params: Optional[Dict[str, Any]] = None  # User-specified model parameters
+    task_list_content: Optional[str] = None  # Task list file content (each line is a task name)
+    skip_container_restart: bool = False  # Skip container restart (for debugging/testing only)
+
+class SubmitEvaluationResponse(BaseModel):
+    status: str
+    job_id: str
+    client_id: Optional[str] = None
+    message: str
+    warning: Optional[str] = None  # Warning if job_id already exists
+
+# ===== Helper Functions =====
+
+def load_sensitive_values() -> Dict[str, str]:
+    """Load sensitive values from token_key_session.py"""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'configs'))
+        from token_key_session import all_token_key_session
+
+        sensitive_keys = [
+            'serper_api_key',
+            'google_cloud_console_api_key',
+            'gcp_project_id',
+            'google_client_id',
+            'google_client_secret',
+            'google_refresh_token',
+            'github_token',
+            'huggingface_token',
+            'wandb_api_key',
+            'notion_integration_key',
+            'notion_integration_key_eval',
+            'source_notion_page_url',
+            'eval_notion_page_url',
+            'snowflake_account',
+            'snowflake_user',
+            'snowflake_password'
+        ]
+
+        sensitive_values = {}
+        for key in sensitive_keys:
+            value = all_token_key_session.get(key)
+            if value and isinstance(value, str) and len(value) > 0:
+                sensitive_values[key] = value
+
+        return sensitive_values
+    except Exception as e:
+        log(f"Warning: Failed to load sensitive values: {e}")
+        return {}
+
+def anonymize_content(content: str, sensitive_values: Dict[str, str]) -> str:
+    """Anonymize sensitive values in content"""
+    if not content or not sensitive_values:
+        return content
+
+    anonymized = content
+    for key, value in sensitive_values.items():
+        if value and len(value) > 1:
+            # Replace with first char + "***" + last char
+            replacement = f"{value[0]}***{value[-1]}"
+            anonymized = anonymized.replace(value, replacement)
+
+    return anonymized
+
+def anonymize_file_content(file_path: Path, sensitive_values: Dict[str, str]) -> Optional[str]:
+    """
+    Read and anonymize file content.
+    Returns anonymized content as string, or None if binary file.
+    """
+    try:
+        # Try to read as text
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Anonymize
+        return anonymize_content(content, sensitive_values)
+
+    except (UnicodeDecodeError, Exception):
+        # Binary file or read error, return None
+        return None
+
+def anonymize_directory(source_dir: Path, temp_dir: Path, sensitive_values: Dict[str, str]):
+    """
+    Recursively copy directory and anonymize all text files.
+
+    Args:
+        source_dir: Source directory to copy from
+        temp_dir: Temporary directory to copy to
+        sensitive_values: Dictionary of sensitive values to anonymize
+    """
+    for item in source_dir.iterdir():
+        dest_item = temp_dir / item.name
+
+        if item.is_dir():
+            # Recursively process subdirectories
+            dest_item.mkdir(exist_ok=True)
+            anonymize_directory(item, dest_item, sensitive_values)
+
+        elif item.is_file():
+            # Try to anonymize text files
+            anonymized_content = anonymize_file_content(item, sensitive_values)
+
+            if anonymized_content is not None:
+                # Text file - write anonymized content
+                with open(dest_item, 'w', encoding='utf-8') as f:
+                    f.write(anonymized_content)
+            else:
+                # Binary file - copy as is
+                shutil.copy2(item, dest_item)
+
+def is_task_finished(status: dict) -> bool:
+    """
+    Check if a task is finished (including success and failure cases).
+
+    Returns True if:
+    - preprocess failed, OR
+    - preprocess succeeded AND running reached terminal state
+    """
+    preprocess = status.get('preprocess')
+    running = status.get('running')
+
+    # Case 1: preprocess failed -> task finished
+    if preprocess == 'fail':
+        return True
+
+    # Case 2: preprocess succeeded and running reached terminal state
+    if preprocess == 'done' and running in ['done', 'timeout', 'max_turn_exceeded', 'fail']:
+        return True
+
+    return False
+
+def check_job_id_exists(job_id: str) -> bool:
+    """Check if job_id already exists in dumps directory or is currently running"""
+    # Check if currently running
+    if current_job and current_job.get("job_id") == job_id:
+        return True
+
+    # Check if directory exists in dumps
+    job_dir = Path(DUMPS_DIR) / job_id
+    return job_dir.exists()
+
+def check_ip_rate_limit(ip: str) -> tuple[bool, str]:
+    """Check if IP has exceeded rate limit"""
+    # -1 means unlimited
+    if MAX_SUBMISSIONS_PER_IP == -1:
+        return True, ""
+
+    now = datetime.now()
+    cutoff = now - timedelta(hours=RATE_LIMIT_HOURS)
+
+    # Clean old records
+    ip_submission_history[ip] = [
+        ts for ts in ip_submission_history[ip]
+        if ts > cutoff
+    ]
+
+    count = len(ip_submission_history[ip])
+    if count >= MAX_SUBMISSIONS_PER_IP:
+        oldest = ip_submission_history[ip][0]
+        retry_after = oldest + timedelta(hours=RATE_LIMIT_HOURS)
+        return False, f"Rate limit exceeded: {MAX_SUBMISSIONS_PER_IP} tasks per {RATE_LIMIT_HOURS} hours. Retry after {retry_after.isoformat()}"
+
+    return True, ""
+
+async def run_command_async(cmd: list, env: dict, log_file: str):
+    """Run command asynchronously and capture output to log file"""
+    with open(log_file, 'a') as log_f:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=log_f,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env
+        )
+        return process
+
+# ===== Background Task Executor =====
+
+async def execute_evaluation(job_id: str, mode: str, config: Dict[str, Any]):
+    """Execute evaluation task in background"""
+    global current_job
+
+    start_time = time.time()
+    job_dir = Path(DUMPS_DIR) / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = str(job_dir / "server_stdout.log")
+    ws_proxy_process = None
+
+    try:
+        with open(log_file, 'w') as f:
+            f.write(f"=== Toolathlon Evaluation Server Log ===\n")
+            f.write(f"Job ID: {job_id}\n")
+            f.write(f"Mode: {mode}\n")
+            f.write(f"Model: {config['model_name']}\n")
+            f.write(f"Workers: {config['workers']}\n")
+            f.write(f"Started: {datetime.now().isoformat()}\n")
+            if config.get('model_params'):
+                f.write(f"Custom model parameters: {json.dumps(config['model_params'], indent=2)}\n")
+            if config.get('skip_container_restart'):
+                f.write(f"⚠️  WARNING: Container restart skipped (debugging/testing mode)\n")
+            if config.get('task_list_content'):
+                f.write(f"Custom task list provided\n")
+            f.write(f"{'='*50}\n\n")
+
+        # Save model_params to file if provided
+        if config.get('model_params'):
+            model_params_file = job_dir / "model_params.json"
+            with open(model_params_file, 'w') as f:
+                json.dump(config['model_params'], f, indent=2)
+            log(f"[Server] Saved custom model parameters to: {model_params_file}")
+
+        # Save task_list to file if provided
+        task_list_file = None
+        if config.get('task_list_content'):
+            task_list_file = job_dir / "task_list.txt"
+            with open(task_list_file, 'w') as f:
+                f.write(config['task_list_content'])
+            log(f"[Server] Saved custom task list to: {task_list_file}")
+
+        # Step 1: Deploy containers (skip if requested)
+        if config.get('skip_container_restart'):
+            with open(log_file, 'a') as f:
+                f.write("=== Step 1: Container deployment SKIPPED (user requested) ===\n")
+                f.write("⚠️  WARNING: Skipping container restart is recommended ONLY for:\n")
+                f.write("   - Debugging purposes\n")
+                f.write("   - Testing a small number of tasks\n")
+                f.write("   For complete evaluation, it is STRONGLY recommended to restart containers\n")
+                f.write("   to ensure a clean environment.\n\n")
+                f.flush()
+            log(f"[Server] WARNING: Skipping container restart for job {job_id}")
+        else:
+            with open(log_file, 'a') as f:
+                f.write("=== Step 1: Deploying local containers ===\n")
+                f.flush()
+
+            deploy_process = await run_command_async(
+                ["bash", "global_preparation/deploy_containers.sh", "true"],
+                env=os.environ.copy(),
+                log_file=log_file
+            )
+
+            await deploy_process.wait()
+
+        with open(log_file, 'a') as f:
+            f.write("\n=== Step 2: Running parallel tests ===\n")
+            f.flush()
+
+        # Step 2: Run tests
+        env = os.environ.copy()
+
+        if mode == "public":
+            env["TOOLATHLON_OPENAI_BASE_URL"] = config["base_url"]
+            env["TOOLATHLON_OPENAI_API_KEY"] = config.get("api_key", "")
+        else:  # private
+            env["TOOLATHLON_OPENAI_BASE_URL"] = f"http://localhost:{WS_PROXY_PORT}/v1"
+            env["TOOLATHLON_OPENAI_API_KEY"] = "dummy"
+
+        # Set model_params file path if provided
+        if config.get('model_params'):
+            model_params_file = job_dir / "model_params.json"
+            env["TOOLATHLON_MODEL_PARAMS_FILE"] = str(model_params_file)
+
+        # Set task_list file path if provided (override the empty default in run_parallel.sh)
+        if task_list_file:
+            env["TASK_LIST"] = str(task_list_file)
+            log(f"[Server] Using custom task list: {task_list_file}")
+
+        run_process = await run_command_async(
+            [
+                "bash", "scripts/run_parallel.sh",
+                config["model_name"],
+                str(job_dir),
+                "unified",
+                str(config["workers"])
+            ],
+            env=env,
+            log_file=log_file
+        )
+
+        current_job["process"] = run_process
+
+        # Monitor execution with timeout
+        while run_process.returncode is None:
+            elapsed = time.time() - start_time
+
+            if elapsed > TIMEOUT_SECONDS:
+                with open(log_file, 'a') as f:
+                    f.write(f"\n\n!!! TIMEOUT: Task exceeded {TIMEOUT_SECONDS//60} minutes !!!\n")
+
+                run_process.kill()
+                await run_process.wait()
+
+                current_job["status"] = "timeout"
+                current_job["error"] = f"Task exceeded {TIMEOUT_SECONDS//60} minutes"
+                log(f"[Server] Job {job_id} timed out after {elapsed//60:.1f} minutes")
+                return
+
+            await asyncio.sleep(5)
+
+        with open(log_file, 'a') as f:
+            f.write("\n=== Step 3: Task completed ===\n")
+            f.write(f"Finished: {datetime.now().isoformat()}\n")
+
+        # Read results
+        eval_stats_file = job_dir / "eval_stats.json"
+        if eval_stats_file.exists():
+            with open(eval_stats_file, 'r') as f:
+                eval_stats = json.load(f)
+            current_job["eval_stats"] = eval_stats
+        else:
+            current_job["eval_stats"] = {"error": "eval_stats.json not found"}
+
+        # Read traj_log_all.jsonl
+        traj_log_file = job_dir / "traj_log_all.jsonl"
+        if traj_log_file.exists():
+            with open(traj_log_file, 'r') as f:
+                current_job["traj_log_all"] = f.read()
+        else:
+            current_job["traj_log_all"] = None
+
+        current_job["status"] = "completed"
+        log(f"[Server] Job {job_id} completed successfully")
+
+    except Exception as e:
+        error_msg = str(e)
+        with open(log_file, 'a') as f:
+            f.write(f"\n\n!!! ERROR: {error_msg} !!!\n")
+
+        current_job["status"] = "failed"
+        current_job["error"] = error_msg
+        log(f"[Server] Job {job_id} failed: {error_msg}")
+
+    finally:
+        # Keep job info for 60 seconds for client to retrieve
+        await asyncio.sleep(60)
+        if current_job and current_job.get("job_id") == job_id:
+            current_job = None
+
+# ===== API Endpoints =====
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Toolathlon Remote Evaluation Server",
+        "version": "1.0.0",
+        "status": "running"
+    }
+
+@app.get("/check_server_status")
+async def check_server_status():
+    """Check if server is busy (public endpoint)"""
+    if current_job:
+        return {
+            "busy": True,
+            "job_id": current_job.get("job_id"),
+            "mode": current_job.get("mode"),
+            "model": current_job.get("model_name"),
+            "started_at": current_job.get("started_at")
+        }
+    else:
+        return {
+            "busy": False,
+            "message": "Server is idle and ready to accept tasks"
+        }
+
+@app.post("/submit_evaluation")
+async def submit_evaluation(request: Request, data: SubmitEvaluationRequest):
+    """Submit an evaluation task"""
+    global current_job
+
+    client_ip = request.client.host
+
+    # Check if client has version (old clients won't have this field)
+    if data.client_version is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Client version missing",
+                "message": "Your client is too old and does not report a version number.",
+                "server_version": SERVER_VERSION,
+                "action": "Please update your client from https://github.com/hkust-nlp/Toolathlon"
+            }
+        )
+
+    # Check client version compatibility
+    if data.client_version not in SUPPORTED_CLIENT_VERSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Client version not supported",
+                "message": f"Client version '{data.client_version}' is not compatible with server version '{SERVER_VERSION}'.",
+                "supported_versions": SUPPORTED_CLIENT_VERSIONS,
+                "action": "Please update your client from https://github.com/hkust-nlp/Toolathlon"
+            }
+        )
+
+    # Check workers limit
+    if data.workers > MAX_WORKERS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Workers limit exceeded",
+                "message": f"Requested workers ({data.workers}) exceeds server limit ({MAX_WORKERS}).",
+                "max_workers": MAX_WORKERS
+            }
+        )
+
+    # Check IP rate limit
+    allowed, error_msg = check_ip_rate_limit(client_ip)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=error_msg)
+
+    # Check if server is busy
+    if current_job is not None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Server is busy",
+                "message": "Server is currently processing another task. Please try again later.",
+                "current_job_started_at": current_job.get("started_at")
+            }
+        )
+
+    # Validate mode
+    if data.mode not in ["public", "private"]:
+        raise HTTPException(status_code=400, detail="Mode must be 'public' or 'private'")
+
+    # Generate or use custom job_id
+    warning_msg = None
+    if data.custom_job_id:
+        job_id = data.custom_job_id
+        # Check if job_id already exists
+        if check_job_id_exists(job_id):
+            warning_msg = f"Job ID '{job_id}' already exists in the system."
+            log(f"[Server] WARNING: Job ID {job_id} already exists, but accepting request (possible resume)")
+    else:
+        job_id = f"job_{uuid.uuid4().hex[:12]}"
+
+    client_id = f"client_{uuid.uuid4().hex[:8]}" if data.mode == "private" else None
+
+    # Record IP submission
+    ip_submission_history[client_ip].append(datetime.now())
+
+    # Initialize job
+    current_job = {
+        "job_id": job_id,
+        "client_id": client_id,
+        "client_ip": client_ip,
+        "mode": data.mode,
+        "model_name": data.model_name,
+        "workers": data.workers,
+        "status": "running",
+        "started_at": datetime.now().isoformat()
+    }
+
+    # Start background task
+    config = {
+        "base_url": data.base_url,
+        "api_key": data.api_key,
+        "model_name": data.model_name,
+        "workers": data.workers,
+        "model_params": data.model_params,
+        "task_list_content": data.task_list_content,
+        "skip_container_restart": data.skip_container_restart
+    }
+
+    asyncio.create_task(execute_evaluation(job_id, data.mode, config))
+
+    log(f"[Server] Accepted job {job_id} from {client_ip} (mode: {data.mode})")
+    if data.model_params:
+        log(f"[Server] Using custom model parameters: {json.dumps(data.model_params)}")
+    if data.task_list_content:
+        # Count number of tasks in the list
+        task_count = len([line.strip() for line in data.task_list_content.strip().split('\n') if line.strip()])
+        log(f"[Server] Using custom task list with {task_count} tasks")
+    if data.skip_container_restart:
+        log(f"[Server] WARNING: Container restart will be skipped (debugging/testing mode only)")
+
+    response = {
+        "status": "accepted",
+        "job_id": job_id,
+        "client_id": client_id,
+        "message": "Task accepted and started"
+    }
+
+    if warning_msg:
+        response["warning"] = warning_msg
+
+    return response
+
+@app.get("/poll_job_status")
+async def poll_job_status(job_id: str):
+    """Poll job status"""
+    # Load sensitive values for anonymization
+    sensitive_values = load_sensitive_values()
+
+    if not current_job or current_job.get("job_id") != job_id:
+        # Check if job exists in dumps (completed job)
+        job_dir = Path(DUMPS_DIR) / job_id
+        eval_stats_file = job_dir / "eval_stats.json"
+
+        if eval_stats_file.exists():
+            with open(eval_stats_file, 'r') as f:
+                eval_stats_content = f.read()
+
+            # Anonymize eval_stats
+            anonymized_eval_stats = anonymize_content(eval_stats_content, sensitive_values)
+            eval_stats = json.loads(anonymized_eval_stats)
+
+            # Also read traj_log_all.jsonl if exists
+            traj_log_file = job_dir / "traj_log_all.jsonl"
+            traj_log_all = None
+            if traj_log_file.exists():
+                with open(traj_log_file, 'r') as f:
+                    traj_log_content = f.read()
+                # Anonymize traj_log
+                traj_log_all = anonymize_content(traj_log_content, sensitive_values)
+
+            return {
+                "status": "completed",
+                "eval_stats": eval_stats,
+                "traj_log_all": traj_log_all
+            }
+        else:
+            return {
+                "status": "cancelled",
+                "error": "Job not found or has been cleaned up"
+            }
+
+    status = current_job.get("status", "running")
+    response = {"status": status}
+
+    if status == "completed":
+        # Anonymize eval_stats if present
+        eval_stats = current_job.get("eval_stats", {})
+        eval_stats_str = json.dumps(eval_stats)
+        anonymized_eval_stats_str = anonymize_content(eval_stats_str, sensitive_values)
+        response["eval_stats"] = json.loads(anonymized_eval_stats_str)
+
+        # Anonymize traj_log_all if present
+        traj_log_all = current_job.get("traj_log_all")
+        if traj_log_all:
+            response["traj_log_all"] = anonymize_content(traj_log_all, sensitive_values)
+        else:
+            response["traj_log_all"] = None
+    elif status in ["failed", "timeout"]:
+        response["error"] = current_job.get("error", "Unknown error")
+
+    return response
+
+@app.get("/get_server_log")
+async def get_server_log(job_id: str, offset: int = 0):
+    """Get server execution log with incremental reading and anonymization"""
+    log_file = Path(DUMPS_DIR) / job_id / "server_stdout.log"
+
+    if not log_file.exists():
+        return {
+            "error": "Log file not found",
+            "content": "",
+            "offset": 0,
+            "size": 0,
+            "complete": False
+        }
+
+    # Load sensitive values for anonymization
+    sensitive_values = load_sensitive_values()
+
+    try:
+        with open(log_file, 'r') as f:
+            f.seek(offset)
+            new_content = f.read()
+            new_offset = f.tell()
+
+        # Anonymize content
+        anonymized_content = anonymize_content(new_content, sensitive_values)
+
+        file_size = log_file.stat().st_size
+
+        # Check if job is complete
+        job_complete = False
+        if current_job and current_job.get("job_id") == job_id:
+            if current_job.get("status") in ["completed", "failed", "timeout", "cancelled"]:
+                job_complete = True
+        else:
+            job_complete = True
+
+        return {
+            "content": anonymized_content,
+            "offset": new_offset,
+            "size": file_size,
+            "complete": job_complete
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "content": "",
+            "offset": offset,
+            "size": 0,
+            "complete": False
+        }
+
+@app.post("/cancel_job")
+async def cancel_job(job_id: str):
+    """Cancel a running job"""
+    global current_job
+
+    if not current_job or current_job.get("job_id") != job_id:
+        # Check if job exists in dumps (already completed)
+        job_dir = Path(DUMPS_DIR) / job_id
+        if job_dir.exists():
+            # Job exists but is not running - check if it completed
+            eval_stats_file = job_dir / "eval_stats.json"
+            if eval_stats_file.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Job has already completed. Cannot cancel a completed job."
+                )
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Job is not running. It may have already finished or been cancelled."
+                )
+        else:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    # Kill process if exists
+    if "process" in current_job:
+        process = current_job["process"]
+        try:
+            # Kill the main bash process
+            process.kill()
+            await process.wait()
+
+            # Kill all related Python processes by name
+            import subprocess
+            try:
+                # Kill all run_parallel.py processes
+                subprocess.run(['pkill', '-9', '-f', 'run_parallel.py'], check=False)
+                # Kill all run_single_containerized.sh processes
+                subprocess.run(['pkill', '-9', '-f', 'run_single_containerized.sh'], check=False)
+            except:
+                pass
+        except:
+            pass
+
+    # Stop and remove all toolathlon docker containers
+    import subprocess
+    try:
+        log(f"[Server] Cleaning up toolathlon docker containers...")
+        # Get all containers with name prefix "toolathlon"
+        result = subprocess.run(
+            ['docker', 'ps', '-a', '--filter', 'name=toolathlon', '--format', '{{.ID}}'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        container_ids = result.stdout.strip().split('\n')
+        container_ids = [cid for cid in container_ids if cid]
+
+        if container_ids:
+            # Force remove containers immediately
+            subprocess.run(['docker', 'rm', '-f'] + container_ids, check=False, timeout=10)
+            log(f"[Server] Force removed {len(container_ids)} toolathlon containers")
+    except Exception as e:
+        log(f"[Server] Warning: Failed to clean up docker containers: {e}")
+
+    current_job["status"] = "cancelled"
+
+    # Clean up after a short delay
+    await asyncio.sleep(10)
+    if current_job and current_job.get("job_id") == job_id:
+        current_job = None
+
+    log(f"[Server] Job {job_id} cancelled")
+
+    return {"status": "cancelled", "job_id": job_id}
+
+@app.get("/get_completed_tasks")
+async def get_completed_tasks(job_id: str):
+    """
+    Get list of completed tasks that haven't been transferred yet.
+
+    Returns:
+        List of task names that are finished but not yet transferred
+    """
+    finalpool_dir = Path(DUMPS_DIR) / job_id / "finalpool"
+
+    if not finalpool_dir.exists():
+        return {"task_names": []}
+
+    completed_tasks = []
+
+    for task_dir in finalpool_dir.iterdir():
+        if not task_dir.is_dir():
+            continue
+
+        task_name = task_dir.name
+
+        # Skip already transferred tasks
+        if task_name in transferred_tasks[job_id]:
+            continue
+
+        # Check if task is finished
+        status_file = task_dir / "status.json"
+        if status_file.exists():
+            try:
+                with open(status_file, 'r') as f:
+                    status = json.load(f)
+
+                if is_task_finished(status):
+                    completed_tasks.append(task_name)
+            except Exception as e:
+                log(f"[Server] Error reading status for task {task_name}: {e}")
+
+    return {"task_names": completed_tasks}
+
+@app.get("/get_task_archive")
+async def get_task_archive(job_id: str, task_name: str):
+    """
+    Get a task directory as a tar.gz archive with MD5 verification.
+    All text files are anonymized before packaging.
+
+    Returns:
+        Streaming response with tar.gz content and MD5 hash in header
+    """
+    task_dir = Path(DUMPS_DIR) / job_id / "finalpool" / task_name
+
+    if not task_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Task {task_name} not found for job {job_id}")
+
+    # Load sensitive values for anonymization
+    sensitive_values = load_sensitive_values()
+
+    temp_dir = None
+    try:
+        # Create temporary directory for anonymized files
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"toolathlon_anon_{task_name}_"))
+        temp_task_dir = temp_dir / task_name
+        temp_task_dir.mkdir(parents=True)
+
+        # Copy and anonymize all files
+        for item in task_dir.iterdir():
+            # Exclude legacy_results
+            if item.name == "legacy_results":
+                continue
+
+            dest_item = temp_task_dir / item.name
+
+            if item.is_dir():
+                # Recursively process directory
+                dest_item.mkdir(exist_ok=True)
+                anonymize_directory(item, dest_item, sensitive_values)
+            elif item.is_file():
+                # Anonymize single file
+                anonymized_content = anonymize_file_content(item, sensitive_values)
+                if anonymized_content is not None:
+                    # Text file
+                    with open(dest_item, 'w', encoding='utf-8') as f:
+                        f.write(anonymized_content)
+                else:
+                    # Binary file
+                    shutil.copy2(item, dest_item)
+
+        # Create tar.gz from anonymized directory
+        tar_buffer = io.BytesIO()
+        with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
+            tar.add(temp_task_dir, arcname=task_name, recursive=True)
+
+        tar_bytes = tar_buffer.getvalue()
+
+        # Calculate MD5
+        md5_hash = hashlib.md5(tar_bytes).hexdigest()
+
+        # Mark as transferred
+        transferred_tasks[job_id].add(task_name)
+
+        log(f"[Server] Sending task archive: {task_name}, size: {len(tar_bytes)} bytes, MD5: {md5_hash}")
+
+        # Return with MD5 in header
+        return Response(
+            content=tar_bytes,
+            media_type="application/gzip",
+            headers={
+                "Content-Disposition": f"attachment; filename={task_name}.tar.gz",
+                "X-Content-MD5": md5_hash
+            }
+        )
+
+    except Exception as e:
+        log(f"[Server] Error creating archive for task {task_name}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create archive: {str(e)}")
+    finally:
+        # Clean up temporary directory
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+@app.get("/get_static_files")
+async def get_static_files(job_id: str):
+    """
+    Get all static files (logs, stats, etc.) as a JSON dictionary.
+    All text content is anonymized before returning.
+
+    Returns:
+        Dictionary with filename -> content mapping
+    """
+    job_dir = Path(DUMPS_DIR) / job_id
+
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    # Load sensitive values for anonymization
+    sensitive_values = load_sensitive_values()
+
+    static_files = [
+        "container_all.log",
+        "eval_res_all.jsonl",
+        "eval_stats.json",
+        "run_all.log",
+        "traj_log_all.jsonl"
+    ]
+
+    # Find execution_report files
+    execution_reports = list(job_dir.glob("execution_report_finalpool_*.json"))
+
+    result = {}
+
+    # Read and anonymize static files
+    for filename in static_files:
+        file_path = job_dir / filename
+        if file_path.exists():
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                # Anonymize content
+                anonymized_content = anonymize_content(content, sensitive_values)
+                result[filename] = anonymized_content
+
+            except Exception as e:
+                log(f"[Server] Error reading {filename}: {e}")
+                result[filename] = f"ERROR: {str(e)}"
+        else:
+            result[filename] = None
+
+    # Read and anonymize execution reports
+    for report_path in execution_reports:
+        try:
+            with open(report_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Anonymize content
+            anonymized_content = anonymize_content(content, sensitive_values)
+            result[report_path.name] = anonymized_content
+
+        except Exception as e:
+            log(f"[Server] Error reading {report_path.name}: {e}")
+
+    log(f"[Server] Sending static files for job {job_id}, {len(result)} files (anonymized)")
+
+    return result
+
+# ===== Main =====
+
+def cleanup_on_shutdown():
+    """Cleanup running jobs and docker containers on server shutdown"""
+    global current_job, ws_proxy_process, ws_proxy_log_file
+
+    print("\n" + "="*60)
+    print("Server shutdown requested (Ctrl+C)")
+    print("="*60)
+
+    # Clean up WebSocket proxy
+    if ws_proxy_process:
+        try:
+            print(f"Stopping WebSocket proxy (PID: {ws_proxy_process.pid})...")
+            ws_proxy_process.kill()
+            ws_proxy_process.wait()
+            print("  ✓ WebSocket proxy killed")
+        except Exception as e:
+            print(f"  ✗ Failed to kill WebSocket proxy: {e}")
+
+        if ws_proxy_log_file:
+            try:
+                ws_proxy_log_file.close()
+            except:
+                pass
+
+    if current_job:
+        job_id = current_job.get("job_id")
+        print(f"Cleaning up running job: {job_id}")
+
+        # Kill process
+        if "process" in current_job:
+            process = current_job["process"]
+            try:
+                print(f"  - Killing process (PID: {process.pid})...")
+                process.kill()
+                print(f"  ✓ Process killed")
+
+                # Kill all related Python processes by name
+                import subprocess
+                try:
+                    print(f"  - Killing run_parallel.py processes...")
+                    subprocess.run(['pkill', '-9', '-f', 'run_parallel.py'], check=False)
+                    print(f"  - Killing run_single_containerized.sh processes...")
+                    subprocess.run(['pkill', '-9', '-f', 'run_single_containerized.sh'], check=False)
+                    print(f"  ✓ All related processes killed")
+                except Exception as e:
+                    print(f"  ✗ Failed to kill related processes: {e}")
+            except Exception as e:
+                print(f"  ✗ Failed to kill process: {e}")
+    else:
+        print("No running jobs to clean up")
+
+    # Clean up docker containers
+    import subprocess
+    try:
+        print("Cleaning up toolathlon docker containers...")
+        result = subprocess.run(
+            ['docker', 'ps', '-a', '--filter', 'name=toolathlon', '--format', '{{.ID}}'],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10
+        )
+        container_ids = result.stdout.strip().split('\n')
+        container_ids = [cid for cid in container_ids if cid]
+
+        if container_ids:
+            print(f"  - Force removing {len(container_ids)} containers...")
+            # Use docker rm -f to force remove immediately without graceful shutdown
+            subprocess.run(['docker', 'rm', '-f'] + container_ids, check=False, timeout=10)
+            print(f"  ✓ Cleaned up {len(container_ids)} containers")
+        else:
+            print("  - No containers to clean up")
+    except Exception as e:
+        print(f"  ✗ Warning: Failed to clean up docker containers: {e}")
+
+    print("="*60)
+    print("Server shutdown complete")
+    print("="*60)
+
+if __name__ == "__main__":
+    import sys
+
+    server_port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+    ws_proxy_port = int(sys.argv[2]) if len(sys.argv) > 2 else 8081
+    max_submissions = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+    max_workers = int(sys.argv[4]) if len(sys.argv) > 4 else 10
+
+    # Update global variables
+    SERVER_PORT = server_port
+    WS_PROXY_PORT = ws_proxy_port
+    MAX_SUBMISSIONS_PER_IP = max_submissions
+    MAX_WORKERS = max_workers
+
+    # Format rate limit message
+    if MAX_SUBMISSIONS_PER_IP == -1:
+        rate_limit_msg = "Unlimited (no rate limiting)"
+    else:
+        rate_limit_msg = f"{MAX_SUBMISSIONS_PER_IP} per {RATE_LIMIT_HOURS} hours"
+
+    print(f"""
+{'='*60}
+Toolathlon Remote Evaluation Server
+{'='*60}
+Server Version: {SERVER_VERSION}
+Supported Client Versions: {', '.join(SUPPORTED_CLIENT_VERSIONS)}
+Server Port: {server_port}
+WebSocket Proxy Port: {ws_proxy_port} (for private mode)
+Max tasks per IP: {rate_limit_msg}
+Max workers per task: {max_workers}
+Timeout: {TIMEOUT_SECONDS//60} minutes
+Output directory: {DUMPS_DIR}
+{'='*60}
+    """)
+
+    # Start WebSocket proxy server
+    print(f"Starting WebSocket proxy server on port {ws_proxy_port}...")
+    ws_log_path = Path(DUMPS_DIR) / "ws_proxy.log"
+    ws_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ws_proxy_log_file = open(str(ws_log_path), 'w', buffering=1)
+
+    import subprocess
+    ws_proxy_process = subprocess.Popen(
+        [sys.executable, "simple_server_ws.py", str(ws_proxy_port)],
+        stdout=ws_proxy_log_file,
+        stderr=subprocess.STDOUT
+    )
+
+    print(f"✓ WebSocket proxy started (PID: {ws_proxy_process.pid})")
+    print(f"  Log: {ws_log_path}")
+    print("="*60)
+
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=server_port)
+    except KeyboardInterrupt:
+        cleanup_on_shutdown()
+        print("\nExiting...")
+
